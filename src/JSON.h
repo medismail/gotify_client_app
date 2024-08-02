@@ -654,6 +654,8 @@ _Bool JSONTokenize(wchar_t *json, size_t jsonLength, StringArrayReference *token
     }else if(c == 'n'){
       success = GetJSONPrimitiveName(json, jsonLength, i, errorMessages, strparam(L"null"), tokenReference);
       if(success){
+        //wchar_t *null = (wchar_t*)malloc(sizeof(wchar_t) * (wcslen(L"null")));
+        //wcscpy(null, L"null");
         LinkedListAddString(ll, strparam(L"null"));
         i = i + wcslen(L"null");
       }
@@ -665,6 +667,7 @@ _Bool JSONTokenize(wchar_t *json, size_t jsonLength, StringArrayReference *token
       if(success){
         LinkedListAddString(ll, tokenReference->string, tokenReference->stringLength);
         i = i + stringLength->numberValue;
+        //free(tokenReference->string);
       }
     }else if(IsJSONNumberCharacter(c)){
       success = GetJSONNumberToken(json, jsonLength, i, tokenReference, errorMessages);
@@ -672,6 +675,7 @@ _Bool JSONTokenize(wchar_t *json, size_t jsonLength, StringArrayReference *token
         LinkedListAddString(ll, tokenReference->string, tokenReference->stringLength);
         i = i + tokenReference->stringLength;
       }
+      //free(tokenReference->string);
     }else{
       str = strConcatenateCharacter(&strLength, strparam(L"Invalid start of Token: "), c);
       stringReference = CreateStringReference(str, strLength);
@@ -686,6 +690,8 @@ _Bool JSONTokenize(wchar_t *json, size_t jsonLength, StringArrayReference *token
     tokensReference->stringArray = LinkedListStringsToArray(&tokensReference->stringArrayLength, ll);
     FreeLinkedListString(ll);
   }
+  free(stringLength);
+  free(tokenReference);
 
   return success;
 }
@@ -955,7 +961,7 @@ _Bool GetJSONString(wchar_t *json, size_t jsonLength, double start, StringRefere
   characterCount = CreateNumberReference(0.0);
   hex = CreateString(&hexLength, 4.0, '0');
   hexReference = (NumberReference *)malloc(sizeof(NumberReference));
-  errorMessage = (StringReference *)malloc(sizeof(StringReference));
+  //errorMessage = (StringReference *)malloc(sizeof(StringReference));
 
   success = IsValidJSONStringInJSON(json, jsonLength, start, characterCount, stringLengthReference, errorMessages);
 
@@ -1018,6 +1024,9 @@ _Bool GetJSONString(wchar_t *json, size_t jsonLength, double start, StringRefere
     AddStringRef(errorMessages, CreateStringReference(strparam(L"End of string was not found.")));
     success = false;
   }
+  free(hex);
+  free(hexReference);
+  free(characterCount);
 
   return success;
 }
@@ -1220,6 +1229,7 @@ void FreeLinkedListElements(LinkedListElements *ll){
   }
 
   free(node);
+  free(ll);
 }
 double ComputeJSONStringLength(Element *element){
   double result;
@@ -1409,7 +1419,18 @@ void DeleteObject(Element *element){
     objectElement = GetObjectValue(element->object, key, keyLength);
     DeleteElement(objectElement);
   }
-  for(i = 0.0; i < element->object->elementListRef->arrayLength; i = i + 1.0){
+  //for(i = 0.0; i < element->object->elementListRef->arrayLength; i = i + 1.0){
+    //if (element->object->elementListRef->array[(int)(i)]->stringLength > 0.0)
+        //free(element->object->elementListRef->array[(int)(i)]->string);
+    //free(element->object->elementListRef->array[(int)(i)]);
+    //if ((element->object->elementListRef->array[(int)(i)])&&(element->object->elementListRef->array[(int)(i)]->string))
+      //free(element->object->elementListRef->array[(int)(i)]->string);
+      //printf("Del: %p, %ls\n", element->object->elementListRef->array[(int)(i)]->string, element->object->elementListRef->array[(int)(i)]->string);
+  //}
+  for(i = 0.0; i < element->object->stringListRef->stringArrayLength; i = i + 1.0){
+    //printf("%p, %ls\n", element->object->stringListRef->stringArray[(int)(i)]->string, element->object->stringListRef->stringArray[(int)(i)]->string);
+    //if (element->object->stringListRef->stringArray[(int)(i)]->stringLength > 0.0)
+    //  free(element->object->stringListRef->stringArray[(int)(i)]->string);
     free(element->object->stringListRef->stringArray[(int)(i)]);
   }
   free(element->object->stringListRef->stringArray);
@@ -1508,10 +1529,10 @@ void WriteArray(Element *element, wchar_t *result, size_t resultLength, NumberRe
 }
 void WriteString(Element *element, wchar_t *result, size_t resultLength, NumberReference *index){
   strWriteStringToStingStream(result, resultLength, index, strparam(L"\""));
-  element->string = JSONEscapeString(&element->stringLength, element->string, element->stringLength);
-  strWriteStringToStingStream(result, resultLength, index, element->string, element->stringLength);
+  wchar_t *string = JSONEscapeString(&element->stringLength, element->string, element->stringLength);
+  strWriteStringToStingStream(result, resultLength, index, string, element->stringLength);
   strWriteStringToStingStream(result, resultLength, index, strparam(L"\""));
-  free(element->string);
+  free(string);
 }
 wchar_t *JSONEscapeString(size_t *returnArrayLength, wchar_t *string, size_t stringLength){
   double i, length;
@@ -1709,6 +1730,7 @@ void WriteObject(Element *element, wchar_t *result, size_t resultLength, NumberR
 _Bool ReadJSON(wchar_t *string, size_t stringLength, ElementReference *elementReference, StringArrayReference *errorMessages){
   StringArrayReference *tokenArrayReference;
   _Bool success;
+  int i;
 
   /* Tokenize. */
   tokenArrayReference = (StringArrayReference *)malloc(sizeof(StringArrayReference));
@@ -1718,7 +1740,22 @@ _Bool ReadJSON(wchar_t *string, size_t stringLength, ElementReference *elementRe
     /* Parse. */
     success = GetJSONValue(tokenArrayReference->stringArray, tokenArrayReference->stringArrayLength, elementReference, errorMessages);
   }
-
+  for(i = 0.0; i < tokenArrayReference->stringArrayLength; i = i + 1.0){
+    if ((tokenArrayReference->stringArray[(int)(i)]->string)&&(tokenArrayReference->stringArray[(int)(i)]->stringLength > 1.0)) {
+      //printf("%p, %ls\n",tokenArrayReference->stringArray[(int)(i)]->string, tokenArrayReference->stringArray[(int)(i)]->string);
+      if(StringsEqual(tokenArrayReference->stringArray[(int)(i)]->string, tokenArrayReference->stringArray[(int)(i)]->stringLength, strparam(L"false"))){
+      } else if(StringsEqual(tokenArrayReference->stringArray[(int)(i)]->string, tokenArrayReference->stringArray[(int)(i)]->stringLength, strparam(L"true"))){
+      } else if(StringsEqual(tokenArrayReference->stringArray[(int)(i)]->string, tokenArrayReference->stringArray[(int)(i)]->stringLength, strparam(L"null"))){
+      } else if(StringsEqual(tokenArrayReference->stringArray[(int)(i)]->string, tokenArrayReference->stringArray[(int)(i)]->stringLength, strparam(L"<end>"))){
+      } else {
+        free(tokenArrayReference->stringArray[(int)(i)]->string);
+      }
+    }
+    free(tokenArrayReference->stringArray[(int)(i)]);
+  }
+  free(tokenArrayReference->stringArray);
+  //FreeStringArrayReference(tokenArrayReference);
+  free(tokenArrayReference);
   return success;
 }
 _Bool GetJSONValue(StringReference **tokens, size_t tokensLength, ElementReference *elementReference, StringArrayReference *errorMessages){
@@ -1727,6 +1764,7 @@ _Bool GetJSONValue(StringReference **tokens, size_t tokensLength, ElementReferen
 
   i = CreateNumberReference(0.0);
   success = GetJSONValueRecursive(tokens, tokensLength, i, 0.0, elementReference, errorMessages);
+  free(i);
 
   return success;
 }
@@ -1761,6 +1799,7 @@ _Bool GetJSONValueRecursive(StringReference **tokens, size_t tokensLength, Numbe
     substr = strSubstring(&substrLength, token, tokenLength, 1.0, tokenLength - 1.0);
     elementReference->element = CreateStringElement(substr, substrLength);
     i->numberValue = i->numberValue + 1.0;
+    //free(substr);
   }else{
     str = (wchar_t *)(L"");
     strLength = wcslen(str);
@@ -1812,12 +1851,15 @@ _Bool GetJSONObject(StringReference **tokens, size_t tokensLength, NumberReferen
         if(StringsEqual(colon, colonLength, strparam(L":"))){
           i->numberValue = i->numberValue + 1.0;
           success = GetJSONValueRecursive(tokens, tokensLength, i, depth, valueReference, errorMessages);
-
           if(success){
             keystring = strSubstring(&keystringLength, key, keyLength, 1.0, keyLength - 1.0);
             value = valueReference->element;
             LinkedListAddString(keys, keystring, keystringLength);
             LinkedListAddElement(values, value);
+       //if (value->string)
+       //printf("VAL:%p, %ls\n", value->string, value->string);
+
+            //free(keystring);
 
             comma = tokens[(int)(i->numberValue)]->string;
             commaLength = tokens[(int)(i->numberValue)]->stringLength;
@@ -2183,6 +2225,8 @@ void testWriter(NumberReference *failures){
   WriteNumber(e, result, resultLength, numberIndex);
 
   AssertStringEquals(strparam(L"0"), result, resultLength, failures);
+  free(result);
+  free(numberIndex);
 }
 Element *createExampleJSON(){
   Element *root, *innerObject, *array;
@@ -3384,6 +3428,11 @@ _Bool nCreateNumberFromStringWithCheck(wchar_t *string, size_t stringLength, dou
     errorMessage->string = (wchar_t *)(L"Base must be from 2 to 36.");
     errorMessage->stringLength = wcslen(errorMessage->string);
   }
+  FreeNumberArrayReference(beforePoint);
+  FreeNumberArrayReference(afterPoint);
+  FreeNumberArrayReference(exponent);
+  free(numberIsPositive);
+  free(exponentIsPositive);
 
   return success;
 }
@@ -4140,6 +4189,7 @@ void FreeLinkedListString(LinkedListStrings *ll){
   }
 
   free(node);
+  free(ll);
 }
 LinkedListNumbers *CreateLinkedListNumbers(){
   LinkedListNumbers *ll;
@@ -5826,3 +5876,38 @@ void AssertStringArraysEqual(StringReference **a, size_t aLength, StringReferenc
   }
 }
 
+void testReadWrite() {
+   NumberReference *failures;
+   failures = CreateNumberReference(0.0);
+   Element *json;
+   wchar_t *string, *string2;
+   size_t stringLength, string2Length;
+   StringArrayReference *errorMessages;
+   ElementReference *elementReference;
+   _Bool success;
+
+   json = createExampleJSON();
+   string = WriteJSON(&stringLength, json);
+   DeleteElement(json);
+
+   elementReference = (ElementReference *)malloc(sizeof(ElementReference));
+   errorMessages = CreateStringArrayReferenceLengthValue(0.0, strparam(L""));
+   success = ReadJSON(string, stringLength, elementReference, errorMessages);
+
+   AssertTrue(success, failures);
+
+   if(success){
+      json = elementReference->element;
+      //string2 = WriteJSON(&string2Length, json);
+
+      //AssertEquals(stringLength, string2Length, failures);
+
+      DeleteElement(json);
+      //free(string2);
+   }
+
+   FreeStringArrayReference(errorMessages);
+   free(elementReference);
+   free(string);
+   free(failures);
+}
