@@ -1,6 +1,3 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #if LIBWEBSOCKETS
 #include <libwebsockets.h>
 #endif
@@ -12,11 +9,8 @@
 #include <libnotify/notify.h>
 #endif
 
-#if LIBCURL
-#include <curl/curl.h>
-#endif
-
 #include "lib/cJSON.h"
+#include "main.h"
 
 #define MAX_NAME_LENGTH         256
 #define MAX_IMAGE_LENGTH        256
@@ -34,6 +28,7 @@ int application_count = 0;
 
 void send_notification(const char *in) {
     //{"id":389,"appid":2,"message":"Ehehe","title":"test","priority":5,"date":"2024-08-01T11:46:50.622413063+02:00"}
+printf("%s\n", in);
     cJSON *in_json = cJSON_Parse(in);
     if (in_json == NULL)
     {
@@ -51,6 +46,7 @@ void send_notification(const char *in) {
     {
         char body[MAX_MESSAGE_LENGTH];
         char appName[MAX_NAME_LENGTH];
+        char imageName[FILENAME_MAX];
         int priority = 0;
         int i = 0;
         cJSON *appid = cJSON_GetObjectItemCaseSensitive(in_json, "appid");
@@ -59,6 +55,8 @@ void send_notification(const char *in) {
                 priority = applications[i].defaultPriority;
                 strncpy(appName, applications[i].name, MAX_NAME_LENGTH);
                 appName[strlen(applications[i].name)] = '\0';
+                strncpy(imageName, applications[i].image, FILENAME_MAX);
+                imageName[strlen(applications[i].image)] = '\0';
                 break;
             }
             i++;
@@ -78,11 +76,11 @@ void send_notification(const char *in) {
         printf("%s: %s\n", appName, title->valuestring);
 
 #ifdef _WIN32
-        MessageBox(NULL, message->valuestring, "Notification", MB_OK | MB_ICONINFORMATION);
+        MessageBox(NULL, body, title->valuestring, MB_OK | MB_ICONINFORMATION);
 #endif
 #if LIBNOTIFY
         notify_init("Gotify Notification");
-        NotifyNotification *n = notify_notification_new(title->valuestring, body, NULL);
+        NotifyNotification *n = notify_notification_new(title->valuestring, body, imageName);
         if (priority < 5) {
             notify_notification_set_urgency(n, NOTIFY_URGENCY_LOW);
         } else if (priority == 5) {
@@ -99,7 +97,7 @@ void send_notification(const char *in) {
     cJSON_Delete(in_json);
 }
 
-void get_applications_data(char *response) {
+void get_applications_data(char *response, char *gotify_url, char *gotify_token) {
     // Parse JSON response
     cJSON *json = cJSON_Parse(response);
     if (json == NULL) {
@@ -119,7 +117,15 @@ void get_applications_data(char *response) {
             strncpy(applications[application_count].name, name->valuestring, sizeof(applications[application_count].name) - 1);
             applications[application_count].id = id->valueint;
             applications[application_count].defaultPriority = defaultPriority->valueint;
-            strncpy(applications[application_count].image, image->valuestring, sizeof(applications[application_count].image) - 1);
+            char image_path[FILENAME_MAX];
+#if LIBCURL
+            char image_url[FILENAME_MAX];
+            snprintf(image_url, sizeof(image_url), "%s%s", gotify_url, image->valuestring);
+            get_image(image_url, gotify_token, image_path);
+#else
+            snprintf(image_path, sizeof(image_path), "%s%s", gotify_url, image->valuestring);
+#endif
+            strncpy(applications[application_count].image, image_path, sizeof(applications[application_count].image) - 1);
             application_count++;
         }
         cJSON_Delete(json);
@@ -127,6 +133,7 @@ void get_applications_data(char *response) {
 }
 
 #if LIBCURL
+#if 0
 struct string {
     char *ptr;
     size_t len;
@@ -156,7 +163,7 @@ size_t writefunc(void *ptr, size_t size, size_t nmemb, struct string *s) {
     return size * nmemb;
 }
 
-void get_applications(char *gotify_apps_url, char *gotify_token) {
+void get_applications(char *gotify_url, char *gotify_token) {
     CURL *curl;
     CURLcode res;
     struct string s;
@@ -169,7 +176,8 @@ void get_applications(char *gotify_apps_url, char *gotify_token) {
         char token_header[256];
         snprintf(token_header, sizeof(token_header), "X-Gotify-Key: %s", gotify_token);
         headers = curl_slist_append(headers, token_header);
-
+        char gotify_apps_url[512];
+        snprintf(gotify_apps_url, sizeof(gotify_apps_url), "%s/application", gotify_url);
         curl_easy_setopt(curl, CURLOPT_URL, gotify_apps_url);
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writefunc);
@@ -181,7 +189,7 @@ void get_applications(char *gotify_apps_url, char *gotify_token) {
         } else {
             printf("%lu bytes retrieved\n", (unsigned long)s.len);
             printf("Data: %s\n", s.ptr);
-            get_applications_data(s.ptr);
+            get_applications_data(s.ptr, gotify_url, gotify_token);
         }
 
         free(s.ptr);
@@ -189,10 +197,12 @@ void get_applications(char *gotify_apps_url, char *gotify_token) {
     }
 }
 #endif
+#endif
 
 #if LIBWEBSOCKETS
 static char *rest_response = NULL;
 static size_t rest_response_len = 0;
+char gurl[MAX_NAME_LENGTH];
 // Callback for HTTP GET request
 static int http_callback(struct lws *wsi, enum lws_callback_reasons reason,
                          void *user, void *in, size_t len) {
@@ -251,8 +261,7 @@ static int http_callback(struct lws *wsi, enum lws_callback_reasons reason,
 	case LWS_CALLBACK_COMPLETED_CLIENT_HTTP:
             // HTTP request completed
 	    lwsl_user("LWS_CALLBACK_COMPLETED_CLIENT_HTTP: %s\n", rest_response);
-
-            get_applications_data(rest_response);
+            get_applications_data(rest_response, gurl, (char *) user);
 
             // After parsing, we can start the WebSocket connection
 	    lws_cancel_service(lws_get_context(wsi)); /* abort poll wait */
@@ -367,18 +376,18 @@ int main(int argc, const char **argv) {
     int use_ssl;
     parse_url(url, hostname, &port, path, &use_ssl);
 
-    char apps_url[512];
-    snprintf(apps_url, sizeof(apps_url), "%s/application", url);
-
     // Append the token to the path
     char ws_path[512];
     snprintf(ws_path, sizeof(ws_path), "%sstream", path);
 
 #if LIBCURL
-    get_applications(apps_url, (char *)token);
+#if 0
+    get_applications(url, (char *)token);
+#endif
 #endif
 
 #if LIBWEBSOCKETS
+    snprintf(gurl, sizeof(gurl), "%s", url);
     struct lws_context_creation_info context_info;
     struct lws_client_connect_info connect_info;
     struct lws_protocols protocols[] = {
