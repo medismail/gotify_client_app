@@ -33,9 +33,14 @@
 #include "lib/cJSON.h"
 #include "main.h"
 
+#include <dirent.h>
+#include <fcntl.h>
+#include <errno.h>
+
 #define MAX_NAME_LENGTH         256
 #define MAX_IMAGE_LENGTH        256
 #define MAX_MESSAGE_LENGTH      1024
+#define CONFIG_ARG_MAX_BYTES    256
 
 typedef struct {
     char name[MAX_NAME_LENGTH];
@@ -46,6 +51,124 @@ typedef struct {
 
 Application *applications = NULL;
 int application_count = 0;
+
+struct
+{
+    char url[MAX_NAME_LENGTH];
+    char token[MAX_NAME_LENGTH];
+} configs;
+
+typedef struct config_option config_option;
+typedef config_option* config_option_t;
+
+struct config_option {
+    config_option_t prev;
+    char key[CONFIG_ARG_MAX_BYTES];
+    char value[CONFIG_ARG_MAX_BYTES];
+};
+
+config_option_t read_config_file(const char* path) {
+    FILE* fp;
+
+    if ((fp = fopen(path, "r+")) == NULL) {
+        perror("fopen()");
+        return NULL;
+    }
+
+    config_option_t last_co_addr = NULL;
+
+    while (1) {
+        config_option_t co = NULL;
+        if ((co = calloc(1, sizeof(config_option))) == NULL)
+            continue;
+        memset(co, 0, sizeof(config_option));
+        co->prev = last_co_addr;
+
+        //TODO
+        //Add fgets and delete space then check
+        if (fscanf(fp, "%s = %s", &co->key[0], &co->value[0]) != 2) {
+            if (feof(fp)) {
+                break;
+            }
+            if (co->key[0] == '#') {
+                while (fgetc(fp) != '\n') {
+                    // Do nothing (to move the cursor to the end of the line).
+                }
+                free(co);
+                continue;
+            }
+            perror("fscanf()");
+            free(co);
+            continue;
+        }
+        //logDebug("Key: %s, Value: %s", co->key, co->value);
+        last_co_addr = co;
+    }
+    fclose(fp);
+    return last_co_addr;
+}
+
+bool parseConf(const char * fileName)
+{
+    bool ret = false;
+    config_option_t configOption;
+    configOption = read_config_file(fileName);
+    while (configOption) {
+        if (strncmp(configOption->key, "URL", 3) == 0) {
+            strncpy(configs.url, configOption->value, MAX_NAME_LENGTH);
+            configs.url[MAX_NAME_LENGTH-1] = '\0';
+        } else if (strncmp(configOption->key, "Token", 5) == 0) {
+            strncpy(configs.token, configOption->value, MAX_NAME_LENGTH);
+            configs.token[MAX_NAME_LENGTH-1] = '\0';
+        }
+        config_option_t co = configOption;
+        configOption = configOption->prev;
+        free(co);
+    }
+    ret = true;
+    return ret;
+}
+
+void send_message_to_pts(const char *pts_name, const char *message) {
+    int pts_fd = open(pts_name, O_WRONLY);
+    if (pts_fd == -1) {
+        perror("open");
+        return;
+    }
+
+    // Write the message directly to the PTS device
+    if (write(pts_fd, message, strlen(message)) == -1) {
+        perror("write");
+    }
+
+    // Close the file descriptor
+    close(pts_fd);
+}
+
+void broadcast_message_to_all_pts(const char *message) {
+    DIR *dir;
+    struct dirent *entry;
+
+    dir = opendir("/dev/pts");
+    if (dir == NULL) {
+        perror("opendir");
+        return;
+    }
+
+    while ((entry = readdir(dir)) != NULL) {
+        // Skip "." and ".."
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        char pts_name[256];
+        snprintf(pts_name, sizeof(pts_name), "/dev/pts/%s", entry->d_name);
+
+        send_message_to_pts(pts_name, message);
+    }
+
+    closedir(dir);
+}
 
 void send_notification(const char *in) {
     //{"id":389,"appid":2,"message":"Ehehe","title":"test","priority":5,"date":"2024-08-01T11:46:50.622413063+02:00"}
@@ -113,6 +236,9 @@ printf("%s\n", in);
         g_object_unref(G_OBJECT(n));
         notify_uninit();
 #endif
+        char wall[MAX_MESSAGE_LENGTH];
+        snprintf(wall, MAX_MESSAGE_LENGTH, "Gotify: %s: %s\n  %s\n", appName, title->valuestring, body);
+        broadcast_message_to_all_pts(wall);
     }
 
     cJSON_Delete(in_json);
@@ -223,7 +349,6 @@ void get_applications(char *gotify_url, char *gotify_token) {
 #if LIBWEBSOCKETS
 static char *rest_response = NULL;
 static size_t rest_response_len = 0;
-char gurl[MAX_NAME_LENGTH];
 // Callback for HTTP GET request
 static int http_callback(struct lws *wsi, enum lws_callback_reasons reason,
                          void *user, void *in, size_t len) {
@@ -282,7 +407,7 @@ static int http_callback(struct lws *wsi, enum lws_callback_reasons reason,
 	case LWS_CALLBACK_COMPLETED_CLIENT_HTTP:
             // HTTP request completed
 	    lwsl_user("LWS_CALLBACK_COMPLETED_CLIENT_HTTP: %s\n", rest_response);
-            get_applications_data(rest_response, gurl, (char *) user);
+            get_applications_data(rest_response, configs.url, (char *) user);
 
             // After parsing, we can start the WebSocket connection
 	    lws_cancel_service(lws_get_context(wsi)); /* abort poll wait */
@@ -380,22 +505,21 @@ void daemonize()
 #endif
 
 int main(int argc, const char **argv) {
-    if (argc < 3) {
-        fprintf(stderr, "Usage: %s <Gotify URL> <Token>\n", argv[0]);
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s <Gotify Config File>\n", argv[0]);
         return 1;
     }
 
-    const char *url = argv[1];
-    const char *token = argv[2];
+    parseConf(argv[1]);
 
-/*    if (argc == 4)
-        daemonize();*/
+    if (argc < 3)
+        daemonize();
 
     char hostname[256];
     int port;
     char path[256];
     int use_ssl;
-    parse_url(url, hostname, &port, path, &use_ssl);
+    parse_url(configs.url, hostname, &port, path, &use_ssl);
 
     // Append the token to the path
     char ws_path[512];
@@ -403,12 +527,11 @@ int main(int argc, const char **argv) {
 
 #if LIBCURL
 #if 0
-    get_applications(url, (char *)token);
+    get_applications(configs.url, (char *)configs.token);
 #endif
 #endif
 
 #if LIBWEBSOCKETS
-    snprintf(gurl, sizeof(gurl), "%s", url);
     struct lws_context_creation_info context_info;
     struct lws_client_connect_info connect_info;
     struct lws_protocols protocols[] = {
@@ -451,7 +574,7 @@ int main(int argc, const char **argv) {
     connect_info_http.host = hostname;
     connect_info_http.origin = hostname;
     connect_info_http.protocol = protocols[0].name;
-    connect_info_http.userdata = (void *)token;
+    connect_info_http.userdata = (void *)configs.token;
     if (use_ssl) {
         connect_info_http.ssl_connection = LCCSCF_USE_SSL;
     }
@@ -479,7 +602,7 @@ int main(int argc, const char **argv) {
     connect_info.origin = hostname;
     connect_info.protocol = protocols[1].name;
     connect_info.pwsi = NULL;
-    connect_info.userdata = (void *)token;
+    connect_info.userdata = (void *)configs.token;
     if (use_ssl) {
         connect_info.ssl_connection = LCCSCF_USE_SSL;
     }
