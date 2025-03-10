@@ -38,9 +38,13 @@
 #include <errno.h>
 
 #define MAX_NAME_LENGTH         256
+#define MAX_PATH_LENGTH         256
 #define MAX_IMAGE_LENGTH        256
-#define MAX_MESSAGE_LENGTH      1024
+#define MAX_HOSTNAME_LENGTH     256
 #define CONFIG_ARG_MAX_BYTES    256
+#define MAX_WSPATH_LENGTH       512
+#define MAX_BUFFER_LENGTH       1024
+#define MAX_MESSAGE_SIZE        1024 * 10
 
 typedef struct {
     char name[MAX_NAME_LENGTH];
@@ -54,7 +58,7 @@ int application_count = 0;
 
 struct
 {
-    char url[MAX_NAME_LENGTH];
+    char url[MAX_PATH_LENGTH];
     char token[MAX_NAME_LENGTH];
 } configs;
 
@@ -115,8 +119,8 @@ bool parseConf(const char * fileName)
     configOption = read_config_file(fileName);
     while (configOption) {
         if (strncmp(configOption->key, "URL", 3) == 0) {
-            strncpy(configs.url, configOption->value, MAX_NAME_LENGTH);
-            configs.url[MAX_NAME_LENGTH-1] = '\0';
+            strncpy(configs.url, configOption->value, MAX_PATH_LENGTH);
+            configs.url[MAX_PATH_LENGTH-1] = '\0';
         } else if (strncmp(configOption->key, "Token", 5) == 0) {
             strncpy(configs.token, configOption->value, MAX_NAME_LENGTH);
             configs.token[MAX_NAME_LENGTH-1] = '\0';
@@ -161,7 +165,7 @@ void broadcast_message_to_all_pts(const char *message) {
             continue;
         }
 
-        char pts_name[256];
+        char pts_name[MAX_PATH_LENGTH];
         snprintf(pts_name, sizeof(pts_name), "/dev/pts/%s", entry->d_name);
 
         send_message_to_pts(pts_name, message);
@@ -188,7 +192,7 @@ printf("%s\n", in);
     cJSON *title = cJSON_GetObjectItemCaseSensitive(in_json, "title");
     if (cJSON_IsString(title) && (title->valuestring != NULL))
     {
-        char body[MAX_MESSAGE_LENGTH];
+        char body[MAX_MESSAGE_SIZE];
         char appName[MAX_NAME_LENGTH];
         char imageName[FILENAME_MAX];
         int priority = 0;
@@ -208,9 +212,9 @@ printf("%s\n", in);
         cJSON *message = cJSON_GetObjectItemCaseSensitive(in_json, "message");
 	if (cJSON_IsString(message) && (message->valuestring != NULL))
         {
-            snprintf(body, MAX_MESSAGE_LENGTH, "%s", message->valuestring);
+            snprintf(body, MAX_MESSAGE_SIZE, "%s", message->valuestring);
         } else {
-            snprintf(body, MAX_MESSAGE_LENGTH, "No message");
+            snprintf(body, MAX_MESSAGE_SIZE, "No message");
         }
         cJSON *json_priority = cJSON_GetObjectItemCaseSensitive(in_json, "priority");
         if (cJSON_IsNumber(json_priority))
@@ -236,8 +240,8 @@ printf("%s\n", in);
         g_object_unref(G_OBJECT(n));
         notify_uninit();
 #endif
-        char wall[MAX_MESSAGE_LENGTH];
-        snprintf(wall, MAX_MESSAGE_LENGTH, "Gotify: %s: %s\n  %s\n", appName, title->valuestring, body);
+        char wall[MAX_MESSAGE_SIZE];
+        snprintf(wall, MAX_MESSAGE_SIZE, "Gotify: %s: %s\n  %s\n", appName, title->valuestring, body);
         broadcast_message_to_all_pts(wall);
     }
 
@@ -320,7 +324,7 @@ void get_applications(char *gotify_url, char *gotify_token) {
     if (curl) {
         struct curl_slist *headers = NULL;
         headers = curl_slist_append(headers, "Content-Type: application/json");
-        char token_header[256];
+        char token_header[MAX_NAME_LENGTH];
         snprintf(token_header, sizeof(token_header), "X-Gotify-Key: %s", gotify_token);
         headers = curl_slist_append(headers, token_header);
         char gotify_apps_url[512];
@@ -347,6 +351,12 @@ void get_applications(char *gotify_url, char *gotify_token) {
 #endif
 
 #if LIBWEBSOCKETS
+struct per_session_data {
+    char *buffer;
+    size_t buffer_size;
+    size_t received_size;
+    char *token;
+};
 static char *rest_response = NULL;
 static size_t rest_response_len = 0;
 // Callback for HTTP GET request
@@ -396,7 +406,7 @@ static int http_callback(struct lws *wsi, enum lws_callback_reasons reason,
 	/* uninterpreted http content */
 	case LWS_CALLBACK_RECEIVE_CLIENT_HTTP:
             {
-		char buffer[MAX_MESSAGE_LENGTH + LWS_PRE];
+		char buffer[MAX_BUFFER_LENGTH + LWS_PRE];
 		char *px = buffer + LWS_PRE;
 		int lenx = sizeof(buffer) - LWS_PRE;
 
@@ -423,11 +433,12 @@ static int http_callback(struct lws *wsi, enum lws_callback_reasons reason,
 
 static int callback_websockets(struct lws *wsi, enum lws_callback_reasons reason,
                              void *user, void *in, size_t len) {
+    struct per_session_data *pss = (struct per_session_data *)user;
     switch (reason) {
         case LWS_CALLBACK_CLIENT_APPEND_HANDSHAKE_HEADER:
         {
             unsigned char **p = (unsigned char **)in, *end = (*p) + len;
-            const char *token = (const char *)user;
+            const char *token = (const char *)pss->token;
             const char *header_name = "X-Gotify-Key: ";
             //size_t header_len = strlen(header_name);
             size_t token_len = strlen(token);
@@ -440,8 +451,55 @@ static int callback_websockets(struct lws *wsi, enum lws_callback_reasons reason
         case LWS_CALLBACK_CLIENT_RECEIVE:
             // Print the received message
             lwsl_user("Received: %s\n", (char *)in);
-            send_notification((char *)in);
+            if (!pss->buffer) {
+                pss->buffer = (char *)malloc(MAX_MESSAGE_SIZE);
+                if (!pss->buffer) {
+                    lwsl_warn("Failed to allocate buffer\n");
+                    return -1;
+                }
+                pss->buffer_size = MAX_MESSAGE_SIZE;
+                pss->received_size = 0;
+            }
+
+            if (pss->received_size + len > pss->buffer_size) {
+                lwsl_warn("Message %d exceeds buffer size %d\n", pss->received_size + len, pss->buffer_size);
+                free(pss->buffer);
+                pss->buffer = NULL;
+                return -1;
+            }
+
+            memcpy(pss->buffer + pss->received_size, in, len);
+            pss->received_size += len;
+
+            // Check if the message is complete
+            if (lws_is_final_fragment(wsi)) {
+                // Process the complete message
+                // process_message(pss->buffer, pss->received_size);
+                send_notification(pss->buffer);
+                // Free the buffer
+                free(pss->buffer);
+                pss->buffer = NULL;
+                pss->received_size = 0;
+            }
+
             break;
+
+        case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
+            lwsl_warn("Connection error\n");
+            if (pss->buffer) {
+                free(pss->buffer);
+                pss->buffer = NULL;
+            }
+            break;
+
+        case LWS_CALLBACK_CLOSED:
+            lwsl_user("Connection closed\n");
+            if (pss->buffer) {
+                free(pss->buffer);
+                pss->buffer = NULL;
+            }
+            break;
+
         default:
             break;
     }
@@ -466,7 +524,7 @@ void parse_url(const char *url, char *hostname, int *port, char *path, int *use_
 
     tmp = strchr(url, '/');
     if (tmp) {
-        strncpy(path, tmp, 256);
+        strncpy(path, tmp, MAX_PATH_LENGTH);
         strncpy(hostname, url, tmp - url);
         hostname[tmp - url] = '\0';
     } else {
@@ -515,14 +573,14 @@ int main(int argc, const char **argv) {
     if (argc < 3)
         daemonize();
 
-    char hostname[256];
+    char hostname[MAX_HOSTNAME_LENGTH];
     int port;
-    char path[256];
+    char path[MAX_PATH_LENGTH];
     int use_ssl;
     parse_url(configs.url, hostname, &port, path, &use_ssl);
 
     // Append the token to the path
-    char ws_path[512];
+    char ws_path[MAX_WSPATH_LENGTH];
     snprintf(ws_path, sizeof(ws_path), "%sstream", path);
 
 #if LIBCURL
@@ -593,6 +651,9 @@ int main(int argc, const char **argv) {
     rest_response = NULL;
     rest_response_len = 0;
 
+    struct per_session_data *pss = malloc(sizeof(struct per_session_data));
+    pss->token = configs.token;
+    pss->buffer = NULL;
     memset(&connect_info, 0, sizeof(connect_info));
     connect_info.context = context;
     connect_info.address = hostname;
@@ -602,7 +663,7 @@ int main(int argc, const char **argv) {
     connect_info.origin = hostname;
     connect_info.protocol = protocols[1].name;
     connect_info.pwsi = NULL;
-    connect_info.userdata = (void *)configs.token;
+    connect_info.userdata = (void *)pss;
     if (use_ssl) {
         connect_info.ssl_connection = LCCSCF_USE_SSL;
     }
@@ -610,12 +671,14 @@ int main(int argc, const char **argv) {
     wsi = lws_client_connect_via_info(&connect_info);
     if (!wsi) {
         fprintf(stderr, "Connection failed\n");
+        free(pss);
         lws_context_destroy(context);
         return 1;
     }
 
     while (lws_service(context, 1000) >= 0);
 
+    free(pss);
     lws_context_destroy(context);
 #endif
 
