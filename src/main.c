@@ -356,6 +356,7 @@ struct per_session_data {
     size_t buffer_size;
     size_t received_size;
     char *token;
+    bool connected;
 };
 static char *rest_response = NULL;
 static size_t rest_response_len = 0;
@@ -484,26 +485,51 @@ static int callback_websockets(struct lws *wsi, enum lws_callback_reasons reason
 
             break;
 
+        case LWS_CALLBACK_CLIENT_ESTABLISHED:
+            pss->connected = true;
+            lwsl_user("WebSocket connected\n");
+            break;
+
         case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
             lwsl_warn("Connection error\n");
+            pss->connected = false;
             if (pss->buffer) {
                 free(pss->buffer);
                 pss->buffer = NULL;
+                pss->received_size = 0;
             }
             break;
 
-        case LWS_CALLBACK_CLOSED:
+        case LWS_CALLBACK_CLIENT_CLOSED:
             lwsl_user("Connection closed\n");
+            pss->connected = false;
             if (pss->buffer) {
                 free(pss->buffer);
                 pss->buffer = NULL;
+                pss->received_size = 0;
             }
             break;
 
         default:
+            //lwsl_user("Unkown reason %u\n", reason);
             break;
     }
     return 0;
+}
+
+// Returns true if connection was successful and clean, false if ended due to disconnect/error
+bool run_websocket_session(struct lws_context *context, 
+                          struct lws_client_connect_info *connect_info,
+                          struct per_session_data *pss) {
+    pss->connected = true;
+    struct lws *wsi = lws_client_connect_via_info(connect_info);
+    if (!wsi) {
+        fprintf(stderr, "Connection failed\n");
+        return false;
+    }
+    // Loop as long as connected
+    while (pss->connected && lws_service(context, 100) >= 0);
+    return pss->connected;
 }
 #endif
 
@@ -577,6 +603,9 @@ int main(int argc, const char **argv) {
     int port;
     char path[MAX_PATH_LENGTH];
     int use_ssl;
+    int retry_count = 0;
+    int max_delay = 60; // seconds, max backoff
+    int base_delay = 1; // seconds, initial backoff
     parse_url(configs.url, hostname, &port, path, &use_ssl);
 
     // Append the token to the path
@@ -668,15 +697,20 @@ int main(int argc, const char **argv) {
         connect_info.ssl_connection = LCCSCF_USE_SSL;
     }
 
-    wsi = lws_client_connect_via_info(&connect_info);
-    if (!wsi) {
-        fprintf(stderr, "Connection failed\n");
-        free(pss);
-        lws_context_destroy(context);
-        return 1;
+    while (1) {
+        // prepare connect_info with pss, context, etc.
+        bool clean_exit = run_websocket_session(context, &connect_info, pss);
+        if (clean_exit) {
+            // Only happens if intentionally closed
+            break;
+        }
+        // Exponential backoff
+        int delay = base_delay << retry_count; // double each time
+        if (delay > max_delay) delay = max_delay;
+        lwsl_warn("WebSocket disconnected, retrying in %d seconds...\n", delay);
+        sleep(delay);
+        retry_count++;
     }
-
-    while (lws_service(context, 1000) >= 0);
 
     free(pss);
     lws_context_destroy(context);
