@@ -23,8 +23,96 @@
 #include <errno.h>
 #include "main.h"
 
-#define APP_FOLDER      "GotifyClientApp"
 
+#ifdef _WIN32
+#include <direct.h>     /* _mkdir, _wmkdir */
+#define WAPP_FOLDER     L"\\GotifyClientApp"
+
+/* ------------------------------------------------------------------ */
+/* 1. file/directory existence test ---------------------------------- */
+int check_file_exists(const char *filename)
+{
+    /* Convert UTF-8 to UTF-16 and ask the OS */
+    WCHAR wpath[MAX_PATH];
+    MultiByteToWideChar(CP_UTF8, 0, filename, -1, wpath, MAX_PATH);
+
+    DWORD attribs = GetFileAttributesW(wpath);
+    return (attribs != INVALID_FILE_ATTRIBUTES);
+}
+
+/* ------------------------------------------------------------------ */
+/* 2. Create directory tree ------------------------------------------ */
+static int create_directory_one(const WCHAR *wpath)
+{
+    /* _wmkdir returns 0 on success, -1 on error */
+    if (_wmkdir(wpath) == 0)               /* created */
+        return 0;
+    if (errno == EEXIST)                   /* already there */
+        return 0;
+    return -1;
+}
+
+int create_directory(const char *path)
+{
+    WCHAR temp[MAX_PATH];
+    MultiByteToWideChar(CP_UTF8, 0, path, -1, temp, MAX_PATH);
+
+    /* Strip trailing back-slash */
+    size_t len = wcslen(temp);
+    if (len && (temp[len - 1] == L'\\' || temp[len - 1] == L'/'))
+        temp[len - 1] = 0;
+
+    /* Walk through the path, creating as we go */
+    for (WCHAR *p = temp + 1; *p; ++p)
+    {
+        if (*p == L'\\' || *p == L'/')
+        {
+            *p = 0;
+            if (create_directory_one(temp) != 0)
+                return -1;
+            *p = L'\\';               /* always use back-slash on Win32 */
+        }
+    }
+    if (create_directory_one(temp) != 0)
+        return -1;
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* 3. Check directory exists, optionally create ---------------------- */
+int check_directory_exists(char *file_path, int create)
+{
+    char dir[MAX_PATH];
+    char *last_slash;
+
+    strcpy(dir, file_path);
+    last_slash = strrchr(dir, '\\');      /* Windows separator */
+    if (!last_slash)
+        last_slash = strrchr(dir, '/');   /* Accept / as well */
+
+    if (last_slash != NULL)
+    {
+        *last_slash = '\0';
+        if (!check_file_exists(dir))
+        {
+            printf("Directory %s does not exist.\n", dir);
+            if (create)
+            {
+                printf("Creating...\n");
+                if (create_directory(dir) != 0)
+                {
+                    printf("Failed to create directory %s\n", dir);
+                    return -1;
+                }
+            }
+            else
+                return -1;
+        }
+    }
+    return 0;
+}
+#else
+#define APP_FOLDER      "GotifyClientApp"
 // Function to check if a file exists
 int check_file_exists(const char *filename) {
     struct stat buffer;
@@ -83,9 +171,10 @@ int check_directory_exists(char *file_path, int create)
     }
     return 0;
 }
+#endif
 
 #ifdef _WIN32
-int get_cache_folder() {
+int get_cache_path(char *cache_file, char *file) {
     PWSTR path = NULL;
     HRESULT hr = SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, NULL, &path);
     if (FAILED(hr)) {
@@ -95,15 +184,18 @@ int get_cache_folder() {
 
     // Append the cache directory to the path
     size_t len = wcslen(path);
-    WCHAR* cache_dir = malloc((len + 7) * sizeof(WCHAR)); // ".cache" is 7 characters including the dot
+    size_t wafl = wcslen(WAPP_FOLDER);
+    WCHAR* cache_dir = malloc((len + wafl) * sizeof(WCHAR));
     if (!cache_dir) {
         CoTaskMemFree(path);
         return 1;
     }
-    wcscpy_s(cache_dir, len + 7, path);
-    wcscpy_s(cache_dir + len, 7, L"\\cache");
+    wcscpy_s(cache_dir, len + wafl, path);
+    wcscpy_s(cache_dir + len, wafl, WAPP_FOLDER);
 
     printf("Cache directory: %ls\n", cache_dir);
+    snprintf(cache_file, FILENAME_MAX, "%ls\\%s", cache_dir, file);
+    check_directory_exists(cache_file, 1);
 
     free(cache_dir);
     CoTaskMemFree(path);

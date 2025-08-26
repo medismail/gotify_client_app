@@ -45,6 +45,7 @@
 #define MAX_WSPATH_LENGTH       512
 #define MAX_BUFFER_LENGTH       1024
 #define MAX_MESSAGE_SIZE        1024 * 10
+//#define BPTS                    1
 
 typedef struct {
     char name[MAX_NAME_LENGTH];
@@ -117,6 +118,9 @@ bool parseConf(const char * fileName)
     bool ret = false;
     config_option_t configOption;
     configOption = read_config_file(fileName);
+    if (configOption == NULL) {
+        return ret;
+    }
     while (configOption) {
         if (strncmp(configOption->key, "URL", 3) == 0) {
             strncpy(configs.url, configOption->value, MAX_PATH_LENGTH);
@@ -133,6 +137,7 @@ bool parseConf(const char * fileName)
     return ret;
 }
 
+#ifdef BPTS
 void send_message_to_pts(const char *pts_name, const char *message) {
     int pts_fd = open(pts_name, O_WRONLY);
     if (pts_fd == -1) {
@@ -173,10 +178,11 @@ void broadcast_message_to_all_pts(const char *message) {
 
     closedir(dir);
 }
+#endif
 
 void send_notification(const char *in) {
     //{"id":389,"appid":2,"message":"Ehehe","title":"test","priority":5,"date":"2024-08-01T11:46:50.622413063+02:00"}
-printf("%s\n", in);
+//printf("%s\n", in);
     cJSON *in_json = cJSON_Parse(in);
     if (in_json == NULL)
     {
@@ -242,7 +248,9 @@ printf("%s\n", in);
 #endif
         char wall[MAX_MESSAGE_SIZE];
         snprintf(wall, MAX_MESSAGE_SIZE, "Gotify: %s: %s\n  %s\n", appName, title->valuestring, body);
+#ifdef BPTS
         broadcast_message_to_all_pts(wall);
+#endif
     }
 
     cJSON_Delete(in_json);
@@ -590,11 +598,13 @@ void daemonize()
 
 int main(int argc, const char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <Gotify Config File>\n", argv[0]);
-        return 1;
+        if (parseConf("GotifyClientApp.conf") == false) {
+            fprintf(stderr, "Usage: %s <Gotify Config File>\n", argv[0]);
+            return 1;
+        }
+    } else if (parseConf(argv[1]) == false) {
+       return 1;
     }
-
-    parseConf(argv[1]);
 
     if (argc < 3)
         daemonize();
