@@ -30,11 +30,15 @@ add_executable(GotifyClientApp
 )
 
 if(WIN32)
-    target_compile_options(file_LIBRARIES PRIVATE -DLIBCURL=${LIBCURL_FOUND}1)
-    target_compile_options(GotifyClientApp PRIVATE -DLIBWEBSOCKETS=${LIBWEBSOCKETS_FOUND}1 -DLIBNOTIFY=${LIBNOTIFY_FOUND}0 -DLIBCURL=${LIBCURL_FOUND}1)
+    target_compile_definitions(file_LIBRARIES PRIVATE LIBCURL=1)
+    target_compile_definitions(GotifyClientApp PRIVATE LIBWEBSOCKETS=1 LIBNOTIFY=0 LIBCURL=1)
 else()
-    target_compile_options(file_LIBRARIES PRIVATE -DLIBCURL=${LIBCURL_FOUND}0)
-    target_compile_options(GotifyClientApp PRIVATE -DLIBWEBSOCKETS=${LIBWEBSOCKETS_FOUND}0 -DLIBNOTIFY=${LIBNOTIFY_FOUND}0 -DLIBCURL=${LIBCURL_FOUND}0)
+    target_compile_definitions(file_LIBRARIES PRIVATE LIBCURL=$<BOOL:${LIBCURL_FOUND}>)
+    target_compile_definitions(GotifyClientApp PRIVATE
+        LIBWEBSOCKETS=$<BOOL:${LIBWEBSOCKETS_FOUND}>
+        LIBNOTIFY=$<BOOL:${LIBNOTIFY_FOUND}>
+        LIBCURL=$<BOOL:${LIBCURL_FOUND}>
+    )
 endif()
 # --- Include dirs ---
 if(WIN32)
