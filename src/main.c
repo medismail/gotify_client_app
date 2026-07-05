@@ -418,7 +418,7 @@ void get_applications(char *gotify_url, char *gotify_token) {
         curl_easy_cleanup(curl);
     }
 }
-#endig
+#endif
 #endif
 
 #if LIBWEBSOCKETS
