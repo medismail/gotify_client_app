@@ -32,6 +32,9 @@
 
 #include "lib/cJSON.h"
 #include "main.h"
+#ifdef _WIN32
+#include "windows_notify.h"
+#endif
 
 #include <ctype.h>
 #include <errno.h>
@@ -250,7 +253,7 @@ void send_notification(const char *in) {
         printf("%s: %s\n", appName, title->valuestring);
 
 #ifdef _WIN32
-        MessageBox(NULL, body, title->valuestring, MB_OK | MB_ICONINFORMATION);
+        windows_show_notification(title->valuestring, body, priority);
 #endif
 #if LIBNOTIFY
         notify_init("Gotify Notification");
@@ -277,6 +280,36 @@ void send_notification(const char *in) {
     }
 
     cJSON_Delete(in_json);
+}
+
+static bool application_should_exit(void)
+{
+#ifdef _WIN32
+    windows_notifications_pump();
+    return windows_notifications_should_exit();
+#else
+    return false;
+#endif
+}
+
+static void sleep_seconds(int seconds)
+{
+    if (seconds <= 0) {
+        return;
+    }
+
+#ifdef _WIN32
+    {
+        DWORD remaining = (DWORD)seconds * 1000U;
+        while (remaining > 0 && !application_should_exit()) {
+            DWORD chunk = remaining < 100U ? remaining : 100U;
+            Sleep(chunk);
+            remaining -= chunk;
+        }
+    }
+#else
+    sleep((unsigned int)seconds);
+#endif
 }
 
 void get_applications_data(char *response, char *gotify_url, char *gotify_token) {
@@ -636,8 +669,8 @@ bool run_websocket_session(struct lws_context *context,
         return false;
     }
     // Loop as long as connected
-    while (!websocket_done && lws_service(context, 100) >= 0);
-    return false;
+    while (!websocket_done && !application_should_exit() && lws_service(context, 100) >= 0);
+    return application_should_exit();
 }
 #endif
 
@@ -741,6 +774,12 @@ int main(int argc, const char **argv) {
     if (argc < 3)
         daemonize();
 
+#ifdef _WIN32
+    if (!windows_notifications_init()) {
+        fprintf(stderr, "Windows tray notifications are disabled\n");
+    }
+#endif
+
 #if LIBWEBSOCKETS
     char hostname[MAX_HOSTNAME_LENGTH];
     int port;
@@ -751,6 +790,9 @@ int main(int argc, const char **argv) {
     int base_delay = 1; // seconds, initial backoff
 
     if (!parse_url(configs.url, hostname, sizeof(hostname), &port, path, sizeof(path), &use_ssl)) {
+#ifdef _WIN32
+        windows_notifications_shutdown();
+#endif
         return 1;
     }
 
@@ -794,6 +836,9 @@ int main(int argc, const char **argv) {
     struct lws_context *context = lws_create_context(&context_info);
     if (!context) {
         fprintf(stderr, "lws init failed\n");
+#ifdef _WIN32
+        windows_notifications_shutdown();
+#endif
         return 1;
     }
 
@@ -816,13 +861,16 @@ int main(int argc, const char **argv) {
     if (wsi == NULL) {
         fprintf(stderr, "Failed to perform HTTP GET request\n");
         lws_context_destroy(context);
+#ifdef _WIN32
+        windows_notifications_shutdown();
+#endif
         return -1;
     }
 
     // Service loop to process HTTP response
     rest_done = false;
     rest_failed = false;
-    while (!rest_done && lws_service(context, 1000) >= 0);
+    while (!rest_done && !application_should_exit() && lws_service(context, 1000) >= 0);
     if (rest_failed) {
         fprintf(stderr, "Failed to fetch Gotify applications\n");
     }
@@ -843,7 +891,7 @@ int main(int argc, const char **argv) {
         connect_info.ssl_connection = LCCSCF_USE_SSL;
     }
 
-    while (1) {
+    while (!application_should_exit()) {
         // prepare connect_info with pss, context, etc.
         bool clean_exit = run_websocket_session(context, &connect_info);
         if (clean_exit) {
@@ -854,15 +902,21 @@ int main(int argc, const char **argv) {
         int delay = base_delay << retry_count; // double each time
         if (delay > max_delay) delay = max_delay;
         lwsl_warn("WebSocket disconnected, retrying in %d seconds...\n", delay);
-        sleep(delay);
+        sleep_seconds(delay);
         retry_count++;
     }
 
     lws_context_destroy(context);
 #else
     fprintf(stderr, "libwebsockets support is disabled\n");
+#ifdef _WIN32
+    windows_notifications_shutdown();
+#endif
     return 1;
 #endif
 
+#ifdef _WIN32
+    windows_notifications_shutdown();
+#endif
     return 0;
 }

@@ -30,8 +30,12 @@ add_executable(GotifyClientApp
 )
 
 if(WIN32)
-    target_compile_definitions(file_LIBRARIES PRIVATE LIBCURL=1)
-    target_compile_definitions(GotifyClientApp PRIVATE LIBWEBSOCKETS=1 LIBNOTIFY=0 LIBCURL=1)
+    target_sources(GotifyClientApp PRIVATE src/windows_notify.c)
+endif()
+
+if(WIN32)
+    target_compile_definitions(file_LIBRARIES PRIVATE LIBCURL=1 UNICODE _UNICODE)
+    target_compile_definitions(GotifyClientApp PRIVATE LIBWEBSOCKETS=1 LIBNOTIFY=0 LIBCURL=1 UNICODE _UNICODE)
 else()
     target_compile_definitions(file_LIBRARIES PRIVATE LIBCURL=$<BOOL:${LIBCURL_FOUND}>)
     target_compile_definitions(GotifyClientApp PRIVATE
@@ -58,6 +62,7 @@ if(WIN32)
         websockets_shared
         shell32
         user32
+        ole32
         ws2_32
     )
 else()
