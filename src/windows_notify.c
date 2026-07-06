@@ -9,11 +9,11 @@
 
 #include "windows_notify.h"
 
+#include <windows.h>
 #include <shellapi.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
-#include <windows.h>
 
 #ifndef ARRAYSIZE
 #define ARRAYSIZE(a) (sizeof(a) / sizeof((a)[0]))
