@@ -44,7 +44,16 @@ endif()
 
 if(WIN32)
     target_compile_definitions(file_LIBRARIES PRIVATE LIBCURL=1 UNICODE _UNICODE)
-    target_compile_definitions(GotifyClientApp PRIVATE LIBWEBSOCKETS=1 LIBNOTIFY=0 LIBCURL=1 UNICODE _UNICODE)
+    target_compile_definitions(GotifyClientApp PRIVATE
+        LIBWEBSOCKETS=1
+        LIBNOTIFY=0
+        LIBCURL=1
+        UNICODE
+        _UNICODE
+        # Some MinGW-w64 headers hide this constant behind NTDDI_VERSION.
+        # The Shell_NotifyIcon protocol value is fixed and documented as 4.
+        NOTIFYICON_VERSION_4=4
+    )
 else()
     target_compile_definitions(file_LIBRARIES PRIVATE LIBCURL=$<BOOL:${LIBCURL_FOUND}>)
     target_compile_definitions(GotifyClientApp PRIVATE
