@@ -30,7 +30,16 @@ add_executable(GotifyClientApp
 )
 
 if(WIN32)
-    target_sources(GotifyClientApp PRIVATE src/windows_notify.c)
+    enable_language(RC)
+    configure_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/windows_resources.rc.in
+        ${CMAKE_CURRENT_BINARY_DIR}/windows_resources.rc
+        @ONLY
+    )
+    target_sources(GotifyClientApp PRIVATE
+        src/windows_notify.c
+        ${CMAKE_CURRENT_BINARY_DIR}/windows_resources.rc
+    )
 endif()
 
 if(WIN32)

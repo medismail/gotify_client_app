@@ -1,0 +1,3 @@
+#include "@CMAKE_CURRENT_SOURCE_DIR@/src/windows_resource.h"
+
+IDI_GOTIFY ICON "@CMAKE_CURRENT_SOURCE_DIR@/assets/gotify.ico"
