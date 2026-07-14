@@ -1,0 +1,86 @@
+name: Channel notification image checks
+
+on:
+  push:
+    branches:
+      - feature/channel-notification-images
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  windows-tray-cross-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MinGW-w64
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gcc-mingw-w64-x86-64
+
+      - name: Generate Windows resource file
+        shell: bash
+        run: |
+          sed "s|@CMAKE_CURRENT_SOURCE_DIR@|${GITHUB_WORKSPACE}|g" \
+            src/windows_resources.rc.in > windows_resources.rc
+          x86_64-w64-mingw32-windres \
+            -I src \
+            windows_resources.rc \
+            -O coff \
+            -o windows_resources.o
+
+      - name: Compile and link Windows notification module
+        shell: bash
+        run: |
+          cat > windows_notify_link_test.c <<'EOF'
+          #include "windows_notify.h"
+          int main(void)
+          {
+              return 0;
+          }
+          EOF
+
+          x86_64-w64-mingw32-gcc \
+            -std=gnu11 \
+            -Wall -Wextra -Wpedantic \
+            -DUNICODE -D_UNICODE \
+            -D_WIN32_WINNT=0x0600 \
+            -DNTDDI_VERSION=0x06000000 \
+            -DNOTIFYICON_VERSION_4=4 \
+            -I src \
+            src/windows_notify.c \
+            windows_notify_link_test.c \
+            windows_resources.o \
+            -lshell32 -luser32 -lgdi32 -lole32 \
+            -o windows-notify-link-test.exe
+
+  linux-notification-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install development headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            libcurl4-openssl-dev \
+            libnotify-dev \
+            libwebsockets-dev
+
+      - name: Compile Linux notification sources
+        shell: bash
+        run: |
+          gcc \
+            -std=gnu11 \
+            -Wall -Wextra -Wpedantic \
+            -DLIBCURL=1 \
+            -DLIBNOTIFY=1 \
+            -DLIBWEBSOCKETS=1 \
+            -I src \
+            $(pkg-config --cflags libcurl libnotify libwebsockets) \
+            -fsyntax-only \
+            src/main.c \
+            src/file.c \
+            src/lib/cJSON.c
