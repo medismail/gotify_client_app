@@ -34,7 +34,9 @@ int check_file_exists(const char *filename)
 {
     /* Convert UTF-8 to UTF-16 and ask the OS */
     WCHAR wpath[MAX_PATH];
-    MultiByteToWideChar(CP_UTF8, 0, filename, -1, wpath, MAX_PATH);
+    if (MultiByteToWideChar(CP_UTF8, 0, filename, -1, wpath, MAX_PATH) == 0) {
+        return 0;
+    }
 
     DWORD attribs = GetFileAttributesW(wpath);
     return (attribs != INVALID_FILE_ATTRIBUTES);
@@ -55,7 +57,9 @@ static int create_directory_one(const WCHAR *wpath)
 int create_directory(const char *path)
 {
     WCHAR temp[MAX_PATH];
-    MultiByteToWideChar(CP_UTF8, 0, path, -1, temp, MAX_PATH);
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, temp, MAX_PATH) == 0) {
+        return -1;
+    }
 
     /* Strip trailing back-slash */
     size_t len = wcslen(temp);
@@ -85,7 +89,7 @@ int check_directory_exists(char *file_path, int create)
     char dir[MAX_PATH];
     char *last_slash;
 
-    strcpy(dir, file_path);
+    snprintf(dir, sizeof(dir), "%s", file_path);
     last_slash = strrchr(dir, '\\');      /* Windows separator */
     if (!last_slash)
         last_slash = strrchr(dir, '/');   /* Accept / as well */
@@ -127,6 +131,9 @@ int create_directory(const char *path) {
 
     snprintf(temp, sizeof(temp), "%s", path);
     len = strlen(temp);
+    if (len == 0) {
+        return -1;
+    }
     if (temp[len - 1] == '/') {
         temp[len - 1] = '\0';
     }
@@ -152,7 +159,7 @@ int check_directory_exists(char *file_path, int create)
 {
     char dir[FILENAME_MAX];
     char *last_slash;
-    strcpy(dir, file_path);
+    snprintf(dir, sizeof(dir), "%s", file_path);
     last_slash = strrchr(dir, '/');
     if (last_slash != NULL) {
         *last_slash = '\0';
@@ -185,17 +192,21 @@ int get_cache_path(char *cache_file, char *file) {
     // Append the cache directory to the path
     size_t len = wcslen(path);
     size_t wafl = wcslen(WAPP_FOLDER);
-    WCHAR* cache_dir = malloc((len + wafl) * sizeof(WCHAR));
+    WCHAR* cache_dir = malloc((len + wafl + 1) * sizeof(WCHAR));
     if (!cache_dir) {
         CoTaskMemFree(path);
         return 1;
     }
-    wcscpy_s(cache_dir, len + wafl, path);
-    wcscpy_s(cache_dir + len, wafl, WAPP_FOLDER);
+    wcscpy_s(cache_dir, len + wafl + 1, path);
+    wcscat_s(cache_dir, len + wafl + 1, WAPP_FOLDER);
 
     printf("Cache directory: %ls\n", cache_dir);
     snprintf(cache_file, FILENAME_MAX, "%ls\\%s", cache_dir, file);
-    check_directory_exists(cache_file, 1);
+    if (check_directory_exists(cache_file, 1) != 0) {
+        free(cache_dir);
+        CoTaskMemFree(path);
+        return 1;
+    }
 
     free(cache_dir);
     CoTaskMemFree(path);
@@ -212,7 +223,9 @@ int get_cache_path(char *cache_file, char *file) {
 
     // Constructing the cache directory path
     snprintf(cache_file, FILENAME_MAX, "%s/.cache/%s/%s", home_dir, APP_FOLDER, file);
-    check_directory_exists(cache_file, 1);
+    if (check_directory_exists(cache_file, 1) != 0) {
+        return EXIT_FAILURE;
+    }
 
     printf("Cache file: %s\n", cache_file);
 
@@ -229,7 +242,7 @@ char* get_last_element(char* uri_path) {
         return (char*)uri_path; // No slashes found, return the entire string
     }
     static char last_element[256]; // Allocate a buffer to store the last element
-    strcpy(last_element, last_slash + 1); // Copy the substring starting from the last slash + 1
+    snprintf(last_element, sizeof(last_element), "%s", last_slash + 1);
     return last_element;
 }
 
@@ -243,6 +256,7 @@ int get_image(char *gotify_image_url, char *gotify_token, char *outfilename) {
     CURL *curl;
     CURLcode res;
     FILE *fp;
+    int ret = 1;
 
     if (get_cache_path(outfilename, get_last_element(gotify_image_url))) {
         return 1;
@@ -257,6 +271,12 @@ int get_image(char *gotify_image_url, char *gotify_token, char *outfilename) {
         char token_header[256];
         snprintf(token_header, sizeof(token_header), "X-Gotify-Key: %s", gotify_token);
         headers = curl_slist_append(headers, token_header);
+        if (headers == NULL) {
+            fprintf(stderr, "Failed to allocate curl headers\n");
+            curl_easy_cleanup(curl);
+            curl_global_cleanup();
+            return 1;
+        }
         // Set the URL of the image
         curl_easy_setopt(curl, CURLOPT_URL, gotify_image_url);
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
@@ -265,6 +285,7 @@ int get_image(char *gotify_image_url, char *gotify_token, char *outfilename) {
         fp = fopen(outfilename, "wb");
         if(fp == NULL) {
             fprintf(stderr, "Failed to open file for writing\n");
+            curl_slist_free_all(headers);
             curl_easy_cleanup(curl);
             curl_global_cleanup();
             return 1;
@@ -280,13 +301,19 @@ int get_image(char *gotify_image_url, char *gotify_token, char *outfilename) {
         // Check for errors
         if(res != CURLE_OK) {
             fprintf(stderr, "curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
+        } else {
+            ret = 0;
         }
 
         // Cleanup
         fclose(fp);
+        curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
+    } else {
+        fprintf(stderr, "curl_easy_init() failed\n");
     }
 
     curl_global_cleanup();
+    return ret;
 }
 #endif

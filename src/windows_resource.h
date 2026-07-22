@@ -1,0 +1,6 @@
+#ifndef GOTIFY_WINDOWS_RESOURCE_H
+#define GOTIFY_WINDOWS_RESOURCE_H
+
+#define IDI_GOTIFY 101
+
+#endif

@@ -30,11 +30,37 @@ add_executable(GotifyClientApp
 )
 
 if(WIN32)
-    target_compile_options(file_LIBRARIES PRIVATE -DLIBCURL=${LIBCURL_FOUND}1)
-    target_compile_options(GotifyClientApp PRIVATE -DLIBWEBSOCKETS=${LIBWEBSOCKETS_FOUND}1 -DLIBNOTIFY=${LIBNOTIFY_FOUND}0 -DLIBCURL=${LIBCURL_FOUND}1)
+    enable_language(RC)
+    configure_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/windows_resources.rc.in
+        ${CMAKE_CURRENT_BINARY_DIR}/windows_resources.rc
+        @ONLY
+    )
+    target_sources(GotifyClientApp PRIVATE
+        src/windows_notify.c
+        ${CMAKE_CURRENT_BINARY_DIR}/windows_resources.rc
+    )
+endif()
+
+if(WIN32)
+    target_compile_definitions(file_LIBRARIES PRIVATE LIBCURL=1 UNICODE _UNICODE)
+    target_compile_definitions(GotifyClientApp PRIVATE
+        LIBWEBSOCKETS=1
+        LIBNOTIFY=0
+        LIBCURL=1
+        UNICODE
+        _UNICODE
+        # Some MinGW-w64 headers hide this constant behind NTDDI_VERSION.
+        # The Shell_NotifyIcon protocol value is fixed and documented as 4.
+        NOTIFYICON_VERSION_4=4
+    )
 else()
-    target_compile_options(file_LIBRARIES PRIVATE -DLIBCURL=${LIBCURL_FOUND}0)
-    target_compile_options(GotifyClientApp PRIVATE -DLIBWEBSOCKETS=${LIBWEBSOCKETS_FOUND}0 -DLIBNOTIFY=${LIBNOTIFY_FOUND}0 -DLIBCURL=${LIBCURL_FOUND}0)
+    target_compile_definitions(file_LIBRARIES PRIVATE LIBCURL=$<BOOL:${LIBCURL_FOUND}>)
+    target_compile_definitions(GotifyClientApp PRIVATE
+        LIBWEBSOCKETS=$<BOOL:${LIBWEBSOCKETS_FOUND}>
+        LIBNOTIFY=$<BOOL:${LIBNOTIFY_FOUND}>
+        LIBCURL=$<BOOL:${LIBCURL_FOUND}>
+    )
 endif()
 # --- Include dirs ---
 if(WIN32)
@@ -54,6 +80,7 @@ if(WIN32)
         websockets_shared
         shell32
         user32
+        ole32
         ws2_32
     )
 else()

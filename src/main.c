@@ -32,10 +32,23 @@
 
 #include "lib/cJSON.h"
 #include "main.h"
+#ifdef _WIN32
+#include "windows_notify.h"
+#endif
 
-#include <dirent.h>
-#include <fcntl.h>
+#include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
+
+#if defined(BPTS) && !defined(_WIN32)
+#include <dirent.h>
+#endif
+
+#ifndef _WIN32
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+#endif
 
 #define MAX_NAME_LENGTH         256
 #define MAX_PATH_LENGTH         256
@@ -63,78 +76,90 @@ struct
     char token[MAX_NAME_LENGTH];
 } configs;
 
-typedef struct config_option config_option;
-typedef config_option* config_option_t;
+static char *trim_whitespace(char *value)
+{
+    char *end;
 
-struct config_option {
-    config_option_t prev;
-    char key[CONFIG_ARG_MAX_BYTES];
-    char value[CONFIG_ARG_MAX_BYTES];
-};
-
-config_option_t read_config_file(const char* path) {
-    FILE* fp;
-
-    if ((fp = fopen(path, "r+")) == NULL) {
-        perror("fopen()");
-        return NULL;
+    while (isspace((unsigned char)*value)) {
+        value++;
     }
 
-    config_option_t last_co_addr = NULL;
-
-    while (1) {
-        config_option_t co = NULL;
-        if ((co = calloc(1, sizeof(config_option))) == NULL)
-            continue;
-        memset(co, 0, sizeof(config_option));
-        co->prev = last_co_addr;
-
-        //TODO
-        //Add fgets and delete space then check
-        if (fscanf(fp, "%s = %s", &co->key[0], &co->value[0]) != 2) {
-            if (feof(fp)) {
-                break;
-            }
-            if (co->key[0] == '#') {
-                while (fgetc(fp) != '\n') {
-                    // Do nothing (to move the cursor to the end of the line).
-                }
-                free(co);
-                continue;
-            }
-            perror("fscanf()");
-            free(co);
-            continue;
-        }
-        //logDebug("Key: %s, Value: %s", co->key, co->value);
-        last_co_addr = co;
+    if (*value == '\0') {
+        return value;
     }
-    fclose(fp);
-    return last_co_addr;
+
+    end = value + strlen(value) - 1;
+    while (end > value && isspace((unsigned char)*end)) {
+        *end = '\0';
+        end--;
+    }
+
+    return value;
+}
+
+static void copy_string(char *dst, size_t dst_size, const char *src)
+{
+    if (dst_size == 0) {
+        return;
+    }
+
+    if (src == NULL) {
+        dst[0] = '\0';
+        return;
+    }
+
+    snprintf(dst, dst_size, "%s", src);
 }
 
 bool parseConf(const char * fileName)
 {
-    bool ret = false;
-    config_option_t configOption;
-    configOption = read_config_file(fileName);
-    if (configOption == NULL) {
-        return ret;
+    FILE *fp;
+    char line[CONFIG_ARG_MAX_BYTES * 2];
+
+    fp = fopen(fileName, "r");
+    if (fp == NULL) {
+        perror("fopen()");
+        return false;
     }
-    while (configOption) {
-        if (strncmp(configOption->key, "URL", 3) == 0) {
-            strncpy(configs.url, configOption->value, MAX_PATH_LENGTH);
-            configs.url[MAX_PATH_LENGTH-1] = '\0';
-        } else if (strncmp(configOption->key, "Token", 5) == 0) {
-            strncpy(configs.token, configOption->value, MAX_NAME_LENGTH);
-            configs.token[MAX_NAME_LENGTH-1] = '\0';
+
+    configs.url[0] = '\0';
+    configs.token[0] = '\0';
+
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        char *key;
+        char *value;
+        char *separator;
+
+        key = trim_whitespace(line);
+        if (*key == '\0' || *key == '#' || *key == ';') {
+            continue;
         }
-        config_option_t co = configOption;
-        configOption = configOption->prev;
-        free(co);
+
+        separator = strchr(key, '=');
+        if (separator == NULL) {
+            fprintf(stderr, "Ignoring invalid config line: %s\n", key);
+            continue;
+        }
+
+        *separator = '\0';
+        value = trim_whitespace(separator + 1);
+        key = trim_whitespace(key);
+
+        if (strcmp(key, "URL") == 0) {
+            copy_string(configs.url, sizeof(configs.url), value);
+        } else if (strcmp(key, "Token") == 0) {
+            copy_string(configs.token, sizeof(configs.token), value);
+        }
     }
-    ret = true;
-    return ret;
+
+    fclose(fp);
+
+    if (configs.url[0] == '\0' || configs.token[0] == '\0') {
+        fprintf(stderr, "Config must contain URL and Token values\n");
+        return false;
+    }
+
+    return true;
 }
 
 #ifdef BPTS
@@ -198,19 +223,17 @@ void send_notification(const char *in) {
     cJSON *title = cJSON_GetObjectItemCaseSensitive(in_json, "title");
     if (cJSON_IsString(title) && (title->valuestring != NULL))
     {
-        char body[MAX_MESSAGE_SIZE];
-        char appName[MAX_NAME_LENGTH];
-        char imageName[FILENAME_MAX];
+        char body[MAX_MESSAGE_SIZE] = "No message";
+        char appName[MAX_NAME_LENGTH] = "Gotify";
+        char imageName[FILENAME_MAX] = "";
         int priority = 0;
         int i = 0;
         cJSON *appid = cJSON_GetObjectItemCaseSensitive(in_json, "appid");
-        while ((appid) && (i < application_count)) {
+        while (cJSON_IsNumber(appid) && (i < application_count)) {
             if (appid->valueint == applications[i].id) {
                 priority = applications[i].defaultPriority;
-                strncpy(appName, applications[i].name, MAX_NAME_LENGTH);
-                appName[strlen(applications[i].name)] = '\0';
-                strncpy(imageName, applications[i].image, FILENAME_MAX);
-                imageName[strlen(applications[i].image)] = '\0';
+                copy_string(appName, sizeof(appName), applications[i].name);
+                copy_string(imageName, sizeof(imageName), applications[i].image);
                 break;
             }
             i++;
@@ -230,7 +253,7 @@ void send_notification(const char *in) {
         printf("%s: %s\n", appName, title->valuestring);
 
 #ifdef _WIN32
-        MessageBox(NULL, body, title->valuestring, MB_OK | MB_ICONINFORMATION);
+        windows_show_notification(title->valuestring, body, priority);
 #endif
 #if LIBNOTIFY
         notify_init("Gotify Notification");
@@ -246,49 +269,122 @@ void send_notification(const char *in) {
         g_object_unref(G_OBJECT(n));
         notify_uninit();
 #endif
-        char wall[MAX_MESSAGE_SIZE];
-        snprintf(wall, MAX_MESSAGE_SIZE, "Gotify: %s: %s\n  %s\n", appName, title->valuestring, body);
 #ifdef BPTS
+        char wall[MAX_MESSAGE_SIZE];
+        snprintf(wall, sizeof(wall), "Gotify: %s: %s\n  %.9000s\n", appName, title->valuestring, body);
         broadcast_message_to_all_pts(wall);
+#endif
+#if !LIBNOTIFY
+        (void)priority;
 #endif
     }
 
     cJSON_Delete(in_json);
 }
 
+static bool application_should_exit(void)
+{
+#ifdef _WIN32
+    windows_notifications_pump();
+    return windows_notifications_should_exit();
+#else
+    return false;
+#endif
+}
+
+static void sleep_seconds(int seconds)
+{
+    if (seconds <= 0) {
+        return;
+    }
+
+#ifdef _WIN32
+    {
+        DWORD remaining = (DWORD)seconds * 1000U;
+        while (remaining > 0 && !application_should_exit()) {
+            DWORD chunk = remaining < 100U ? remaining : 100U;
+            Sleep(chunk);
+            remaining -= chunk;
+        }
+    }
+#else
+    sleep((unsigned int)seconds);
+#endif
+}
+
 void get_applications_data(char *response, char *gotify_url, char *gotify_token) {
     // Parse JSON response
+#if !LIBCURL
+    (void)gotify_token;
+#endif
+    Application *new_applications = NULL;
+    int new_application_count = 0;
     cJSON *json = cJSON_Parse(response);
     if (json == NULL) {
         fprintf(stderr, "Failed to parse JSON\n");
-    } else {
-        cJSON *app;
-        cJSON_ArrayForEach(app, json) {
-           applications = realloc(applications, (application_count + 1) * sizeof(Application));
-           if (!applications) {
-               fprintf(stderr, "Out of memory while reallocating applications\n");
-               break;
-            }
-            cJSON *name = cJSON_GetObjectItem(app, "name");
-            cJSON *id = cJSON_GetObjectItem(app, "id");
-            cJSON *defaultPriority = cJSON_GetObjectItem(app, "defaultPriority");
-            cJSON *image = cJSON_GetObjectItem(app, "image");
-            strncpy(applications[application_count].name, name->valuestring, sizeof(applications[application_count].name) - 1);
-            applications[application_count].id = id->valueint;
-            applications[application_count].defaultPriority = defaultPriority->valueint;
-            char image_path[FILENAME_MAX];
-#if LIBCURL
-            char image_url[FILENAME_MAX];
-            snprintf(image_url, sizeof(image_url), "%s%s", gotify_url, image->valuestring);
-            get_image(image_url, gotify_token, image_path);
-#else
-            snprintf(image_path, sizeof(image_path), "%s%s", gotify_url, image->valuestring);
-#endif
-            strncpy(applications[application_count].image, image_path, sizeof(applications[application_count].image) - 1);
-            application_count++;
-        }
-        cJSON_Delete(json);
+        return;
     }
+
+    if (!cJSON_IsArray(json)) {
+        fprintf(stderr, "Applications response is not a JSON array\n");
+        cJSON_Delete(json);
+        return;
+    }
+
+    cJSON *app;
+    cJSON_ArrayForEach(app, json) {
+        cJSON *name = cJSON_GetObjectItemCaseSensitive(app, "name");
+        cJSON *id = cJSON_GetObjectItemCaseSensitive(app, "id");
+        cJSON *defaultPriority = cJSON_GetObjectItemCaseSensitive(app, "defaultPriority");
+        cJSON *image = cJSON_GetObjectItemCaseSensitive(app, "image");
+        Application *resized;
+        char image_path[FILENAME_MAX] = "";
+
+        if (!cJSON_IsString(name) || name->valuestring == NULL ||
+            !cJSON_IsNumber(id) || !cJSON_IsNumber(defaultPriority) ||
+            !cJSON_IsString(image) || image->valuestring == NULL) {
+            fprintf(stderr, "Skipping invalid application entry\n");
+            continue;
+        }
+
+        resized = realloc(new_applications, (size_t)(new_application_count + 1) * sizeof(Application));
+        if (resized == NULL) {
+            fprintf(stderr, "Out of memory while reallocating applications\n");
+            break;
+        }
+
+        new_applications = resized;
+        memset(&new_applications[new_application_count], 0, sizeof(Application));
+        copy_string(new_applications[new_application_count].name,
+                    sizeof(new_applications[new_application_count].name),
+                    name->valuestring);
+        new_applications[new_application_count].id = id->valueint;
+        new_applications[new_application_count].defaultPriority = defaultPriority->valueint;
+
+#if LIBCURL
+        char image_url[FILENAME_MAX];
+        snprintf(image_url, sizeof(image_url), "%s%s", gotify_url, image->valuestring);
+        if (get_image(image_url, gotify_token, image_path) != 0) {
+            image_path[0] = '\0';
+        }
+#else
+        snprintf(image_path, sizeof(image_path), "%s%s", gotify_url, image->valuestring);
+#endif
+        copy_string(new_applications[new_application_count].image,
+                    sizeof(new_applications[new_application_count].image),
+                    image_path);
+        new_application_count++;
+    }
+
+    if (new_application_count > 0) {
+        free(applications);
+        applications = new_applications;
+        application_count = new_application_count;
+    } else {
+        free(new_applications);
+    }
+
+    cJSON_Delete(json);
 }
 
 #if LIBCURL
@@ -368,18 +464,22 @@ struct per_session_data {
 };
 static char *rest_response = NULL;
 static size_t rest_response_len = 0;
+static bool rest_done = false;
+static bool rest_failed = false;
+static bool websocket_done = false;
 // Callback for HTTP GET request
 static int http_callback(struct lws *wsi, enum lws_callback_reasons reason,
                          void *user, void *in, size_t len) {
+    (void)user;
+
     switch (reason) {
         case LWS_CALLBACK_CLIENT_APPEND_HANDSHAKE_HEADER:
         {
             unsigned char **p = (unsigned char **)in, *end = (*p) + len;
-            const char *token = (const char *)user;
             const char *header_name = "X-Gotify-Key: ";
-            size_t token_len = strlen(token);
+            size_t token_len = strlen(configs.token);
 
-            if (lws_add_http_header_by_name(wsi, (unsigned char *)header_name, (unsigned char *)token, token_len, p, end)) {
+            if (lws_add_http_header_by_name(wsi, (unsigned char *)header_name, (unsigned char *)configs.token, token_len, p, end)) {
                 return -1;
             }
             break;
@@ -387,6 +487,8 @@ static int http_callback(struct lws *wsi, enum lws_callback_reasons reason,
 	case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
             lwsl_err("CLIENT_CONNECTION_ERROR: %s\n",
 			 in ? (char *)in : "(null)");
+            rest_failed = true;
+            rest_done = true;
             lws_cancel_service(lws_get_context(wsi));
             break;
 	case LWS_CALLBACK_ESTABLISHED_CLIENT_HTTP:
@@ -403,11 +505,14 @@ static int http_callback(struct lws *wsi, enum lws_callback_reasons reason,
 	    lwsl_user("RECEIVE_CLIENT_HTTP_READ: read %d\n", (int)len);
 
             // Append received data to rest_response
-            rest_response = realloc(rest_response, rest_response_len + len + 1);
-            if (!rest_response) {
+            char *resized = realloc(rest_response, rest_response_len + len + 1);
+            if (resized == NULL) {
                 fprintf(stderr, "Out of memory while receiving HTTP response\n");
+                rest_failed = true;
+                rest_done = true;
                 return -1;
             }
+            rest_response = resized;
             memcpy(rest_response + rest_response_len, in, len);
             rest_response_len += len;
             rest_response[rest_response_len] = '\0';
@@ -425,13 +530,20 @@ static int http_callback(struct lws *wsi, enum lws_callback_reasons reason,
 	    return 0; /* don't passthru */
 	case LWS_CALLBACK_COMPLETED_CLIENT_HTTP:
             // HTTP request completed
-	    lwsl_user("LWS_CALLBACK_COMPLETED_CLIENT_HTTP: %s\n", rest_response);
-            get_applications_data(rest_response, configs.url, (char *) user);
+	    lwsl_user("LWS_CALLBACK_COMPLETED_CLIENT_HTTP: %s\n", rest_response ? rest_response : "");
+            if (rest_response != NULL) {
+                get_applications_data(rest_response, configs.url, configs.token);
+            }
+            rest_done = true;
 
             // After parsing, we can start the WebSocket connection
 	    lws_cancel_service(lws_get_context(wsi)); /* abort poll wait */
 	    break;
 	case LWS_CALLBACK_CLOSED_CLIENT_HTTP:
+            if (!rest_done) {
+                rest_failed = true;
+                rest_done = true;
+            }
             lws_cancel_service(lws_get_context(wsi)); /* abort poll wait */
             break;
         default:
@@ -447,33 +559,41 @@ static int callback_websockets(struct lws *wsi, enum lws_callback_reasons reason
         case LWS_CALLBACK_CLIENT_APPEND_HANDSHAKE_HEADER:
         {
             unsigned char **p = (unsigned char **)in, *end = (*p) + len;
-            const char *token = (const char *)pss->token;
             const char *header_name = "X-Gotify-Key: ";
             //size_t header_len = strlen(header_name);
-            size_t token_len = strlen(token);
+            size_t token_len = strlen(configs.token);
 
-            if (lws_add_http_header_by_name(wsi, (unsigned char *)header_name, (unsigned char *)token, token_len, p, end)) {
+            if (pss != NULL) {
+                memset(pss, 0, sizeof(*pss));
+                pss->token = configs.token;
+            }
+
+            if (lws_add_http_header_by_name(wsi, (unsigned char *)header_name, (unsigned char *)configs.token, token_len, p, end)) {
                 return -1;
             }
             break;
         }
         case LWS_CALLBACK_CLIENT_RECEIVE:
             // Print the received message
-            lwsl_user("Received: %s\n", (char *)in);
+            if (pss == NULL) {
+                return -1;
+            }
+            lwsl_user("Received %zu bytes\n", len);
             if (!pss->buffer) {
-                pss->buffer = (char *)malloc(MAX_MESSAGE_SIZE);
+                pss->buffer = (char *)malloc(MAX_MESSAGE_SIZE + 1);
                 if (!pss->buffer) {
                     lwsl_warn("Failed to allocate buffer\n");
                     return -1;
                 }
-                pss->buffer_size = MAX_MESSAGE_SIZE;
+                pss->buffer_size = MAX_MESSAGE_SIZE + 1;
                 pss->received_size = 0;
             }
 
-            if (pss->received_size + len > pss->buffer_size) {
-                lwsl_warn("Message %d exceeds buffer size %d\n", pss->received_size + len, pss->buffer_size);
+            if (len >= pss->buffer_size || pss->received_size > pss->buffer_size - len - 1) {
+                lwsl_warn("Message %zu exceeds buffer size %zu\n", pss->received_size + len, pss->buffer_size);
                 free(pss->buffer);
                 pss->buffer = NULL;
+                pss->received_size = 0;
                 return -1;
             }
 
@@ -484,6 +604,7 @@ static int callback_websockets(struct lws *wsi, enum lws_callback_reasons reason
             if (lws_is_final_fragment(wsi)) {
                 // Process the complete message
                 // process_message(pss->buffer, pss->received_size);
+                pss->buffer[pss->received_size] = '\0';
                 send_notification(pss->buffer);
                 // Free the buffer
                 free(pss->buffer);
@@ -494,14 +615,24 @@ static int callback_websockets(struct lws *wsi, enum lws_callback_reasons reason
             break;
 
         case LWS_CALLBACK_CLIENT_ESTABLISHED:
+            if (pss == NULL) {
+                return -1;
+            }
+            pss->buffer = NULL;
+            pss->buffer_size = 0;
+            pss->received_size = 0;
+            pss->token = configs.token;
             pss->connected = true;
             lwsl_user("WebSocket connected\n");
             break;
 
         case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
             lwsl_warn("Connection error\n");
-            pss->connected = false;
-            if (pss->buffer) {
+            websocket_done = true;
+            if (pss != NULL) {
+                pss->connected = false;
+            }
+            if (pss != NULL && pss->buffer) {
                 free(pss->buffer);
                 pss->buffer = NULL;
                 pss->received_size = 0;
@@ -510,8 +641,11 @@ static int callback_websockets(struct lws *wsi, enum lws_callback_reasons reason
 
         case LWS_CALLBACK_CLIENT_CLOSED:
             lwsl_user("Connection closed\n");
-            pss->connected = false;
-            if (pss->buffer) {
+            websocket_done = true;
+            if (pss != NULL) {
+                pss->connected = false;
+            }
+            if (pss != NULL && pss->buffer) {
                 free(pss->buffer);
                 pss->buffer = NULL;
                 pss->received_size = 0;
@@ -527,22 +661,24 @@ static int callback_websockets(struct lws *wsi, enum lws_callback_reasons reason
 
 // Returns true if connection was successful and clean, false if ended due to disconnect/error
 bool run_websocket_session(struct lws_context *context, 
-                          struct lws_client_connect_info *connect_info,
-                          struct per_session_data *pss) {
-    pss->connected = true;
+                          struct lws_client_connect_info *connect_info) {
+    websocket_done = false;
     struct lws *wsi = lws_client_connect_via_info(connect_info);
     if (!wsi) {
         fprintf(stderr, "Connection failed\n");
         return false;
     }
     // Loop as long as connected
-    while (pss->connected && lws_service(context, 100) >= 0);
-    return pss->connected;
+    while (!websocket_done && !application_should_exit() && lws_service(context, 100) >= 0);
+    return application_should_exit();
 }
 #endif
 
-void parse_url(const char *url, char *hostname, int *port, char *path, int *use_ssl) {
-    char *tmp;
+#if LIBWEBSOCKETS
+bool parse_url(const char *url, char *hostname, size_t hostname_size, int *port, char *path, size_t path_size, int *use_ssl) {
+    const char *tmp;
+    size_t hostname_len;
+
     if (strncmp(url, "http://", 7) == 0) {
         url += 7;
         *port = 80;
@@ -553,25 +689,50 @@ void parse_url(const char *url, char *hostname, int *port, char *path, int *use_
         *use_ssl = 1;
     } else {
         fprintf(stderr, "Invalid URL scheme\n");
-        exit(1);
+        return false;
     }
 
     tmp = strchr(url, '/');
     if (tmp) {
-        strncpy(path, tmp, MAX_PATH_LENGTH);
-        strncpy(hostname, url, tmp - url);
-        hostname[tmp - url] = '\0';
+        hostname_len = (size_t)(tmp - url);
+        if (hostname_len >= hostname_size) {
+            fprintf(stderr, "Hostname is too long\n");
+            return false;
+        }
+        snprintf(path, path_size, "%s", tmp);
+        memcpy(hostname, url, hostname_len);
+        hostname[hostname_len] = '\0';
     } else {
-        strcpy(path, "/");
-        strcpy(hostname, url);
+        snprintf(path, path_size, "/");
+        snprintf(hostname, hostname_size, "%s", url);
     }
 
-    tmp = strchr(hostname, ':');
-    if (tmp) {
-        *tmp = '\0';
-        *port = atoi(tmp + 1);
+    char *port_separator = strchr(hostname, ':');
+    if (port_separator) {
+        *port_separator = '\0';
+        *port = atoi(port_separator + 1);
+        if (*port <= 0 || *port > 65535) {
+            fprintf(stderr, "Invalid URL port\n");
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static void build_endpoint_path(const char *base_path, const char *endpoint, char *out, size_t out_size)
+{
+    size_t len = strlen(base_path);
+
+    if (strcmp(base_path, "/") == 0) {
+        snprintf(out, out_size, "/%s", endpoint);
+    } else if (len > 0 && base_path[len - 1] == '/') {
+        snprintf(out, out_size, "%s%s", base_path, endpoint);
+    } else {
+        snprintf(out, out_size, "%s/%s", base_path, endpoint);
     }
 }
+#endif
 
 #ifdef _WIN32
 void daemonize()
@@ -591,7 +752,11 @@ void daemonize()
     sid = setsid(); /* obtain a new process group */
     if (sid < 0) exit(EXIT_FAILURE);
     if ((chdir("/")) < 0) exit(EXIT_FAILURE);
-    for (i = getdtablesize(); i >= 0; --i) close(i); /* close all descriptors */
+    i = (int)sysconf(_SC_OPEN_MAX);
+    if (i < 0) {
+        i = 1024;
+    }
+    for (; i >= 0; --i) close(i); /* close all descriptors */
     i = open("/dev/null",O_RDWR); dup(i); dup(i); /* handle standart I/O */
 }
 #endif
@@ -609,6 +774,13 @@ int main(int argc, const char **argv) {
     if (argc < 3)
         daemonize();
 
+#ifdef _WIN32
+    if (!windows_notifications_init()) {
+        fprintf(stderr, "Windows tray notifications are disabled\n");
+    }
+#endif
+
+#if LIBWEBSOCKETS
     char hostname[MAX_HOSTNAME_LENGTH];
     int port;
     char path[MAX_PATH_LENGTH];
@@ -616,11 +788,18 @@ int main(int argc, const char **argv) {
     int retry_count = 0;
     int max_delay = 60; // seconds, max backoff
     int base_delay = 1; // seconds, initial backoff
-    parse_url(configs.url, hostname, &port, path, &use_ssl);
 
-    // Append the token to the path
+    if (!parse_url(configs.url, hostname, sizeof(hostname), &port, path, sizeof(path), &use_ssl)) {
+#ifdef _WIN32
+        windows_notifications_shutdown();
+#endif
+        return 1;
+    }
+
     char ws_path[MAX_WSPATH_LENGTH];
-    snprintf(ws_path, sizeof(ws_path), "%sstream", path);
+    char application_path[MAX_WSPATH_LENGTH];
+    build_endpoint_path(path, "stream", ws_path, sizeof(ws_path));
+    build_endpoint_path(path, "application", application_path, sizeof(application_path));
 
 #if LIBCURL
 #if 0
@@ -628,7 +807,6 @@ int main(int argc, const char **argv) {
 #endif
 #endif
 
-#if LIBWEBSOCKETS
     struct lws_context_creation_info context_info;
     struct lws_client_connect_info connect_info;
     struct lws_protocols protocols[] = {
@@ -641,15 +819,15 @@ int main(int argc, const char **argv) {
         {
             "websocket-protocol",
             callback_websockets,
-            0,
+            sizeof(struct per_session_data),
             65536,
         },
         { NULL, NULL, 0, 0 } /* terminator */
     };
     struct lws *wsi;
 
-    lws_cmdline_option_handle_builtin(argc, argv, &context_info);
     memset(&context_info, 0, sizeof(context_info));
+    lws_cmdline_option_handle_builtin(argc, argv, &context_info);
     context_info.protocols = protocols;
     if (use_ssl) {
         context_info.options |= LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
@@ -658,6 +836,9 @@ int main(int argc, const char **argv) {
     struct lws_context *context = lws_create_context(&context_info);
     if (!context) {
         fprintf(stderr, "lws init failed\n");
+#ifdef _WIN32
+        windows_notifications_shutdown();
+#endif
         return 1;
     }
 
@@ -667,11 +848,10 @@ int main(int argc, const char **argv) {
     connect_info_http.context = context;
     connect_info_http.address = hostname;
     connect_info_http.port = port;
-    connect_info_http.path = "/application";
+    connect_info_http.path = application_path;
     connect_info_http.host = hostname;
     connect_info_http.origin = hostname;
     connect_info_http.protocol = protocols[0].name;
-    connect_info_http.userdata = (void *)configs.token;
     if (use_ssl) {
         connect_info_http.ssl_connection = LCCSCF_USE_SSL;
     }
@@ -681,18 +861,23 @@ int main(int argc, const char **argv) {
     if (wsi == NULL) {
         fprintf(stderr, "Failed to perform HTTP GET request\n");
         lws_context_destroy(context);
+#ifdef _WIN32
+        windows_notifications_shutdown();
+#endif
         return -1;
     }
 
     // Service loop to process HTTP response
-    while (lws_service(context, 1000) >= 0 && rest_response == NULL);
+    rest_done = false;
+    rest_failed = false;
+    while (!rest_done && !application_should_exit() && lws_service(context, 1000) >= 0);
+    if (rest_failed) {
+        fprintf(stderr, "Failed to fetch Gotify applications\n");
+    }
     free(rest_response);
     rest_response = NULL;
     rest_response_len = 0;
 
-    struct per_session_data *pss = malloc(sizeof(struct per_session_data));
-    pss->token = configs.token;
-    pss->buffer = NULL;
     memset(&connect_info, 0, sizeof(connect_info));
     connect_info.context = context;
     connect_info.address = hostname;
@@ -702,14 +887,13 @@ int main(int argc, const char **argv) {
     connect_info.origin = hostname;
     connect_info.protocol = protocols[1].name;
     connect_info.pwsi = NULL;
-    connect_info.userdata = (void *)pss;
     if (use_ssl) {
         connect_info.ssl_connection = LCCSCF_USE_SSL;
     }
 
-    while (1) {
+    while (!application_should_exit()) {
         // prepare connect_info with pss, context, etc.
-        bool clean_exit = run_websocket_session(context, &connect_info, pss);
+        bool clean_exit = run_websocket_session(context, &connect_info);
         if (clean_exit) {
             // Only happens if intentionally closed
             break;
@@ -718,13 +902,21 @@ int main(int argc, const char **argv) {
         int delay = base_delay << retry_count; // double each time
         if (delay > max_delay) delay = max_delay;
         lwsl_warn("WebSocket disconnected, retrying in %d seconds...\n", delay);
-        sleep(delay);
+        sleep_seconds(delay);
         retry_count++;
     }
 
-    free(pss);
     lws_context_destroy(context);
+#else
+    fprintf(stderr, "libwebsockets support is disabled\n");
+#ifdef _WIN32
+    windows_notifications_shutdown();
+#endif
+    return 1;
 #endif
 
+#ifdef _WIN32
+    windows_notifications_shutdown();
+#endif
     return 0;
 }
