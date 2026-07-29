@@ -7,12 +7,18 @@
 #define _UNICODE
 #endif
 
+#define COBJMACROS
+
 #include "windows_notify.h"
 #include "windows_resource.h"
 
 #include <windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
+#include <initguid.h>
+#include <wincodec.h>
+#include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,20 +40,31 @@
 #ifndef NIN_KEYSELECT
 #define NIN_KEYSELECT (NIN_SELECT | NINF_KEY)
 #endif
+#ifndef NIIF_LARGE_ICON
+#define NIIF_LARGE_ICON 0x00000020
+#endif
 
 #define WM_TRAYICON (WM_APP + 1)
 #define WM_GOTIFY_NOTIFICATION (WM_APP + 2)
 #define ID_TRAY_EXIT 1001
 #define ID_TRAY_TEST_NOTIFICATION 1002
 #define TRAY_SHUTDOWN_TIMEOUT_MS 5000U
+#define CHANNEL_IMAGE_PATH_CHARS 1024
 
 struct tray_notification_payload {
     wchar_t title[64];
     wchar_t text[256];
+    wchar_t image_path[CHANNEL_IMAGE_PATH_CHARS];
     DWORD icon_type;
 };
 
-/* All window, menu and icon objects are owned by tray_thread. */
+struct channel_icon_cache_entry {
+    wchar_t *path;
+    HICON icon;
+    struct channel_icon_cache_entry *next;
+};
+
+/* All window, menu, WIC and icon objects are owned by tray_thread. */
 static NOTIFYICONDATAW nid;
 static HMENU tray_menu = NULL;
 static HINSTANCE tray_instance = NULL;
@@ -56,6 +73,9 @@ static bool tray_icon_owned = false;
 static bool tray_added = false;
 static bool tray_version_4 = false;
 static UINT taskbar_created_message = 0;
+static IWICImagingFactory *wic_factory = NULL;
+static bool com_initialized = false;
+static struct channel_icon_cache_entry *channel_icon_cache = NULL;
 
 /* Cross-thread state is accessed only through Interlocked operations. */
 static PVOID volatile tray_hwnd_value = NULL;
@@ -165,6 +185,324 @@ static void copy_utf8_to_wide(wchar_t *dest, size_t dest_count, const char *src)
     free(wide);
 }
 
+static wchar_t *duplicate_wide_string(const wchar_t *value)
+{
+    wchar_t *copy;
+    size_t length;
+
+    if (value == NULL) {
+        return NULL;
+    }
+
+    length = wcslen(value);
+    copy = (wchar_t *)malloc((length + 1) * sizeof(*copy));
+    if (copy != NULL) {
+        memcpy(copy, value, (length + 1) * sizeof(*copy));
+    }
+    return copy;
+}
+
+static bool initialize_wic(void)
+{
+    HRESULT hr;
+
+    hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    if (SUCCEEDED(hr)) {
+        com_initialized = true;
+    } else if (hr != RPC_E_CHANGED_MODE) {
+        tray_debug_message("CoInitializeEx failed; channel icons disabled");
+        return false;
+    }
+
+    hr = CoCreateInstance(&CLSID_WICImagingFactory,
+                          NULL,
+                          CLSCTX_INPROC_SERVER,
+                          &IID_IWICImagingFactory,
+                          (void **)&wic_factory);
+    if (FAILED(hr)) {
+        wic_factory = NULL;
+        tray_debug_message("WIC factory creation failed; channel icons disabled");
+        return false;
+    }
+
+    return true;
+}
+
+static void clear_channel_icon_cache(void)
+{
+    struct channel_icon_cache_entry *entry = channel_icon_cache;
+
+    while (entry != NULL) {
+        struct channel_icon_cache_entry *next = entry->next;
+        if (entry->icon != NULL) {
+            DestroyIcon(entry->icon);
+        }
+        free(entry->path);
+        free(entry);
+        entry = next;
+    }
+    channel_icon_cache = NULL;
+}
+
+static void shutdown_wic(void)
+{
+    clear_channel_icon_cache();
+
+    if (wic_factory != NULL) {
+        IWICImagingFactory_Release(wic_factory);
+        wic_factory = NULL;
+    }
+
+    if (com_initialized) {
+        CoUninitialize();
+        com_initialized = false;
+    }
+}
+
+static HICON create_icon_from_wic_source(IWICBitmapSource *source,
+                                         UINT width,
+                                         UINT height)
+{
+    IWICFormatConverter *converter = NULL;
+    BITMAPV5HEADER bitmap_header;
+    ICONINFO icon_info;
+    HBITMAP color_bitmap = NULL;
+    HBITMAP mask_bitmap = NULL;
+    HICON icon = NULL;
+    HDC screen_dc = NULL;
+    BYTE *color_bits = NULL;
+    BYTE *mask_bits = NULL;
+    UINT color_stride;
+    UINT color_size;
+    UINT mask_stride;
+    size_t mask_size;
+    HRESULT hr;
+
+    if (wic_factory == NULL || source == NULL || width == 0 || height == 0 ||
+        width > UINT_MAX / 4U) {
+        return NULL;
+    }
+
+    color_stride = width * 4U;
+    if (height > UINT_MAX / color_stride) {
+        return NULL;
+    }
+    color_size = color_stride * height;
+
+    hr = IWICImagingFactory_CreateFormatConverter(wic_factory, &converter);
+    if (FAILED(hr)) {
+        goto cleanup;
+    }
+
+    hr = IWICFormatConverter_Initialize(converter,
+                                       source,
+                                       &GUID_WICPixelFormat32bppPBGRA,
+                                       WICBitmapDitherTypeNone,
+                                       NULL,
+                                       0.0,
+                                       WICBitmapPaletteTypeCustom);
+    if (FAILED(hr)) {
+        goto cleanup;
+    }
+
+    memset(&bitmap_header, 0, sizeof(bitmap_header));
+    bitmap_header.bV5Size = sizeof(bitmap_header);
+    bitmap_header.bV5Width = (LONG)width;
+    bitmap_header.bV5Height = -(LONG)height;
+    bitmap_header.bV5Planes = 1;
+    bitmap_header.bV5BitCount = 32;
+    bitmap_header.bV5Compression = BI_BITFIELDS;
+    bitmap_header.bV5RedMask = 0x00ff0000;
+    bitmap_header.bV5GreenMask = 0x0000ff00;
+    bitmap_header.bV5BlueMask = 0x000000ff;
+    bitmap_header.bV5AlphaMask = 0xff000000;
+    bitmap_header.bV5CSType = LCS_sRGB;
+
+    screen_dc = GetDC(NULL);
+    color_bitmap = CreateDIBSection(screen_dc,
+                                    (BITMAPINFO *)&bitmap_header,
+                                    DIB_RGB_COLORS,
+                                    (void **)&color_bits,
+                                    NULL,
+                                    0);
+    if (screen_dc != NULL) {
+        ReleaseDC(NULL, screen_dc);
+        screen_dc = NULL;
+    }
+    if (color_bitmap == NULL || color_bits == NULL) {
+        goto cleanup;
+    }
+
+    hr = IWICFormatConverter_CopyPixels(converter,
+                                        NULL,
+                                        color_stride,
+                                        color_size,
+                                        color_bits);
+    if (FAILED(hr)) {
+        goto cleanup;
+    }
+
+    mask_stride = ((width + 15U) / 16U) * 2U;
+    if (height > SIZE_MAX / mask_stride) {
+        goto cleanup;
+    }
+    mask_size = (size_t)mask_stride * height;
+    mask_bits = (BYTE *)calloc(1, mask_size);
+    if (mask_bits == NULL) {
+        goto cleanup;
+    }
+
+    mask_bitmap = CreateBitmap((int)width,
+                               (int)height,
+                               1,
+                               1,
+                               mask_bits);
+    if (mask_bitmap == NULL) {
+        goto cleanup;
+    }
+
+    memset(&icon_info, 0, sizeof(icon_info));
+    icon_info.fIcon = TRUE;
+    icon_info.hbmColor = color_bitmap;
+    icon_info.hbmMask = mask_bitmap;
+    icon = CreateIconIndirect(&icon_info);
+
+cleanup:
+    if (screen_dc != NULL) {
+        ReleaseDC(NULL, screen_dc);
+    }
+    if (mask_bitmap != NULL) {
+        DeleteObject(mask_bitmap);
+    }
+    if (color_bitmap != NULL) {
+        DeleteObject(color_bitmap);
+    }
+    free(mask_bits);
+    if (converter != NULL) {
+        IWICFormatConverter_Release(converter);
+    }
+    return icon;
+}
+
+static HICON load_channel_icon_from_file(const wchar_t *path)
+{
+    IWICBitmapDecoder *decoder = NULL;
+    IWICBitmapFrameDecode *frame = NULL;
+    IWICBitmapScaler *scaler = NULL;
+    IWICBitmapSource *source = NULL;
+    HICON icon = NULL;
+    UINT source_width = 0;
+    UINT source_height = 0;
+    UINT target_width;
+    UINT target_height;
+    HRESULT hr;
+
+    if (wic_factory == NULL || path == NULL || path[0] == L'\0') {
+        return NULL;
+    }
+
+    target_width = (UINT)GetSystemMetrics(SM_CXICON);
+    target_height = (UINT)GetSystemMetrics(SM_CYICON);
+    if (target_width == 0) {
+        target_width = 32;
+    }
+    if (target_height == 0) {
+        target_height = 32;
+    }
+
+    hr = IWICImagingFactory_CreateDecoderFromFilename(wic_factory,
+                                                       path,
+                                                       NULL,
+                                                       GENERIC_READ,
+                                                       WICDecodeMetadataCacheOnLoad,
+                                                       &decoder);
+    if (FAILED(hr)) {
+        goto cleanup;
+    }
+
+    hr = IWICBitmapDecoder_GetFrame(decoder, 0, &frame);
+    if (FAILED(hr)) {
+        goto cleanup;
+    }
+
+    hr = IWICBitmapFrameDecode_GetSize(frame, &source_width, &source_height);
+    if (FAILED(hr) || source_width == 0 || source_height == 0) {
+        goto cleanup;
+    }
+
+    source = (IWICBitmapSource *)frame;
+    if (source_width != target_width || source_height != target_height) {
+        hr = IWICImagingFactory_CreateBitmapScaler(wic_factory, &scaler);
+        if (FAILED(hr)) {
+            goto cleanup;
+        }
+
+        hr = IWICBitmapScaler_Initialize(scaler,
+                                        source,
+                                        target_width,
+                                        target_height,
+                                        WICBitmapInterpolationModeFant);
+        if (FAILED(hr)) {
+            goto cleanup;
+        }
+        source = (IWICBitmapSource *)scaler;
+    }
+
+    icon = create_icon_from_wic_source(source, target_width, target_height);
+
+cleanup:
+    if (scaler != NULL) {
+        IWICBitmapScaler_Release(scaler);
+    }
+    if (frame != NULL) {
+        IWICBitmapFrameDecode_Release(frame);
+    }
+    if (decoder != NULL) {
+        IWICBitmapDecoder_Release(decoder);
+    }
+    return icon;
+}
+
+static HICON get_channel_icon(const wchar_t *path)
+{
+    struct channel_icon_cache_entry *entry;
+    HICON icon;
+
+    if (path == NULL || path[0] == L'\0') {
+        return NULL;
+    }
+
+    for (entry = channel_icon_cache; entry != NULL; entry = entry->next) {
+        if (_wcsicmp(entry->path, path) == 0) {
+            return entry->icon;
+        }
+    }
+
+    icon = load_channel_icon_from_file(path);
+    if (icon == NULL) {
+        tray_debug_message("Unable to decode channel notification icon");
+        return NULL;
+    }
+
+    entry = (struct channel_icon_cache_entry *)calloc(1, sizeof(*entry));
+    if (entry == NULL) {
+        DestroyIcon(icon);
+        return NULL;
+    }
+
+    entry->path = duplicate_wide_string(path);
+    if (entry->path == NULL) {
+        DestroyIcon(icon);
+        free(entry);
+        return NULL;
+    }
+
+    entry->icon = icon;
+    entry->next = channel_icon_cache;
+    channel_icon_cache = entry;
+    return icon;
+}
+
 static HICON load_gotify_icon(int width, int height)
 {
     HICON icon;
@@ -215,6 +553,8 @@ static void destroy_tray_resources(void)
         tray_menu = NULL;
     }
 
+    clear_channel_icon_cache();
+
     if (tray_icon_owned && tray_icon != NULL) {
         DestroyIcon(tray_icon);
     }
@@ -226,15 +566,26 @@ static void destroy_tray_resources(void)
 
 static void show_notification_ui(const struct tray_notification_payload *payload)
 {
+    HICON channel_icon;
+
     if (!tray_added || payload == NULL) {
         return;
     }
 
+    channel_icon = get_channel_icon(payload->image_path);
     nid.uFlags |= NIF_INFO;
-    nid.dwInfoFlags = payload->icon_type;
     nid.uTimeout = 5000;
     copy_wide_truncated(nid.szInfoTitle, ARRAYSIZE(nid.szInfoTitle), payload->title);
     copy_wide_truncated(nid.szInfo, ARRAYSIZE(nid.szInfo), payload->text);
+
+    if (channel_icon != NULL) {
+        nid.hBalloonIcon = channel_icon;
+        nid.dwInfoFlags = NIIF_USER | NIIF_LARGE_ICON;
+    } else {
+        nid.hBalloonIcon = NULL;
+        nid.dwInfoFlags = payload->icon_type;
+    }
+
     Shell_NotifyIconW(NIM_MODIFY, &nid);
 }
 
@@ -243,9 +594,6 @@ static void execute_tray_command(HWND hwnd, UINT command)
     if (command == ID_TRAY_EXIT) {
         tray_debug_message("Exit selected");
         InterlockedExchange(&quit_requested, 1);
-
-        /* lws_service() can sleep indefinitely on current libwebsockets.
-           Remove the icon cleanly, then terminate for an immediate user-requested exit. */
         DestroyWindow(hwnd);
         ExitProcess(0);
     } else if (command == ID_TRAY_TEST_NOTIFICATION) {
@@ -279,8 +627,6 @@ static void show_context_menu(HWND hwnd, POINT pt)
                                    0,
                                    hwnd,
                                    NULL);
-
-    /* Required by the Win32 notification-area menu contract. */
     PostMessageW(hwnd, WM_NULL, 0, 0);
     tray_debug_message("Context menu closed");
     execute_tray_command(hwnd, command);
@@ -368,14 +714,15 @@ static DWORD WINAPI tray_thread_proc(LPVOID parameter)
     MSG msg;
     bool initialized;
 
-    /* Force creation of this thread's message queue before init is reported. */
     PeekMessageW(&msg, NULL, WM_USER, WM_USER, PM_NOREMOVE);
+    initialize_wic();
 
     initialized = initialize_tray_window();
     InterlockedExchange(&tray_init_result, initialized ? 1 : -1);
     SetEvent(ready_event);
 
     if (!initialized) {
+        shutdown_wic();
         return 1;
     }
 
@@ -389,6 +736,7 @@ static DWORD WINAPI tray_thread_proc(LPVOID parameter)
         DestroyWindow(get_tray_hwnd());
     }
     discard_pending_notifications();
+    shutdown_wic();
     tray_debug_message("Tray message thread stopped");
     return 0;
 }
@@ -475,7 +823,10 @@ bool windows_notifications_should_exit(void)
     return InterlockedCompareExchange(&quit_requested, 0, 0) != 0;
 }
 
-void windows_show_notification(const char *title_utf8, const char *text_utf8, int priority)
+void windows_show_notification(const char *title_utf8,
+                               const char *text_utf8,
+                               const char *image_path_utf8,
+                               int priority)
 {
     struct tray_notification_payload *payload;
     HWND hwnd = get_tray_hwnd();
@@ -491,12 +842,30 @@ void windows_show_notification(const char *title_utf8, const char *text_utf8, in
 
     copy_utf8_to_wide(payload->title, ARRAYSIZE(payload->title), title_utf8);
     copy_utf8_to_wide(payload->text, ARRAYSIZE(payload->text), text_utf8);
+    copy_utf8_to_wide(payload->image_path,
+                      ARRAYSIZE(payload->image_path),
+                      image_path_utf8);
     payload->icon_type = priority > 5 ? NIIF_ERROR : NIIF_INFO;
 
     if (!PostMessageW(hwnd, WM_GOTIFY_NOTIFICATION, 0, (LPARAM)payload)) {
         tray_debug_message("PostMessage notification failed");
         free(payload);
     }
+}
+
+static void show_running_notification(void)
+{
+    struct tray_notification_payload payload;
+
+    memset(&payload, 0, sizeof(payload));
+    copy_wide_truncated(payload.title,
+                        ARRAYSIZE(payload.title),
+                        L"Gotify Client App");
+    copy_wide_truncated(payload.text,
+                        ARRAYSIZE(payload.text),
+                        L"Gotify notifications are running.");
+    payload.icon_type = NIIF_INFO;
+    show_notification_ui(&payload);
 }
 
 static LRESULT CALLBACK tray_window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
@@ -541,16 +910,7 @@ static LRESULT CALLBACK tray_window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPA
                     }
                     show_context_menu(hwnd, pt);
                 } else if (event == NIN_SELECT || event == NIN_KEYSELECT) {
-                    struct tray_notification_payload payload;
-                    memset(&payload, 0, sizeof(payload));
-                    copy_wide_truncated(payload.title,
-                                        ARRAYSIZE(payload.title),
-                                        L"Gotify Client App");
-                    copy_wide_truncated(payload.text,
-                                        ARRAYSIZE(payload.text),
-                                        L"Gotify notifications are running.");
-                    payload.icon_type = NIIF_INFO;
-                    show_notification_ui(&payload);
+                    show_running_notification();
                 }
             } else {
                 if (event == WM_RBUTTONUP) {
@@ -558,16 +918,7 @@ static LRESULT CALLBACK tray_window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPA
                     GetCursorPos(&pt);
                     show_context_menu(hwnd, pt);
                 } else if (event == WM_LBUTTONDBLCLK) {
-                    struct tray_notification_payload payload;
-                    memset(&payload, 0, sizeof(payload));
-                    copy_wide_truncated(payload.title,
-                                        ARRAYSIZE(payload.title),
-                                        L"Gotify Client App");
-                    copy_wide_truncated(payload.text,
-                                        ARRAYSIZE(payload.text),
-                                        L"Gotify notifications are running.");
-                    payload.icon_type = NIIF_INFO;
-                    show_notification_ui(&payload);
+                    show_running_notification();
                 }
             }
             break;
