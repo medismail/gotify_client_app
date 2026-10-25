@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.10)
 project(GotifyClientApp)
 
 set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
 
 # --- Dependencies ---
 if(WIN32)
@@ -43,29 +44,40 @@ if(WIN32)
 endif()
 
 if(WIN32)
-    target_compile_definitions(file_LIBRARIES PRIVATE LIBCURL=1 UNICODE _UNICODE)
+    target_compile_definitions(file_LIBRARIES PRIVATE
+        LIBCURL=1
+        UNICODE
+        _UNICODE
+        _WIN32_WINNT=0x0600
+        NTDDI_VERSION=0x06000000
+    )
     target_compile_definitions(GotifyClientApp PRIVATE
         LIBWEBSOCKETS=1
         LIBNOTIFY=0
         LIBCURL=1
         UNICODE
         _UNICODE
+        _WIN32_WINNT=0x0600
+        NTDDI_VERSION=0x06000000
         # Some MinGW-w64 headers hide this constant behind NTDDI_VERSION.
-        # The Shell_NotifyIcon protocol value is fixed and documented as 4.
         NOTIFYICON_VERSION_4=4
     )
 else()
-    target_compile_definitions(file_LIBRARIES PRIVATE LIBCURL=$<BOOL:${LIBCURL_FOUND}>)
+    target_compile_definitions(file_LIBRARIES PRIVATE
+        LIBCURL=$<BOOL:${LIBCURL_FOUND}>
+    )
     target_compile_definitions(GotifyClientApp PRIVATE
         LIBWEBSOCKETS=$<BOOL:${LIBWEBSOCKETS_FOUND}>
         LIBNOTIFY=$<BOOL:${LIBNOTIFY_FOUND}>
         LIBCURL=$<BOOL:${LIBCURL_FOUND}>
     )
 endif()
+
 # --- Include dirs ---
 if(WIN32)
-    # Handled by imported targets
+    target_include_directories(file_LIBRARIES PRIVATE ${CURL_INCLUDE_DIRS})
 else()
+    target_include_directories(file_LIBRARIES PRIVATE ${LIBCURL_INCLUDE_DIRS})
     target_include_directories(GotifyClientApp PRIVATE
         ${LIBCURL_INCLUDE_DIRS}
         ${LIBWEBSOCKETS_INCLUDE_DIRS}
@@ -80,11 +92,11 @@ if(WIN32)
         websockets_shared
         shell32
         user32
+        gdi32
         ole32
         ws2_32
     )
 else()
-    #target_link_libraries(GotifyClientApp PRIVATE ${LIBNOTIFY_LIBRARIES} ${LIBWEBSOCKETS_LIBRARIES} ${LIBCURL_LIBRARIES})
     target_link_libraries(GotifyClientApp PRIVATE
         ${LIBCURL_LIBRARIES}
         ${LIBWEBSOCKETS_LIBRARIES}.a

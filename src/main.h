@@ -4,28 +4,15 @@
  * @author Mohamed-Ismail MJRI <imejri@hotmail.com>
  *
  * @license AGPL-3.0
- *
- * This code is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License, version 3,
- * along with this program. If not, see <http://www.gnu.org/licenses/>
- *
  */
-
 #ifndef _GCA_MAIN_H_
 #define _GCA_MAIN_H_
 
+#include <stdbool.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdbool.h>
 
 #if LIBCURL
 #include <curl/curl.h>
@@ -36,6 +23,10 @@
 #include <shlobj.h>
 #endif
 
-int get_image(char *gotify_image_url, char *gotify_token, char *outfilename);
+int get_image(const char *gotify_image_url,
+              const char *gotify_token,
+              const char *cache_name,
+              char *outfilename,
+              size_t outfilename_size);
 
 #endif /* _GCA_MAIN_H_ */
