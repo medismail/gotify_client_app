@@ -67,6 +67,23 @@ make
 
 On Windows, use your preferred CMake and build setup.
 
+#### Windows subsystem (MinGW)
+
+MinGW builds default to **`-mwindows`**, so launching the tray client does not
+open a console window. For a debug build with console output, configure CMake
+with `-DGOTIFY_WINDOWS_CONSOLE=ON` to link using **`-mconsole`**:
+
+```bash
+cmake -S . -B build-win-debug \
+  -DCMAKE_TOOLCHAIN_FILE=mingw-w64-x86_64.cmake \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DGOTIFY_WINDOWS_CONSOLE=ON
+cmake --build build-win-debug
+```
+
+Leave `GOTIFY_WINDOWS_CONSOLE` unset (or set it to `OFF`) for the regular
+windowless tray application. This setting has no effect on Linux builds.
+
 ### Running
 
 ```bash
