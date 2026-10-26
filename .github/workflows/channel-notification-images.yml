@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feature/channel-notification-images
+      - feature/windows-tray-settings
   pull_request:
     branches:
       - main
@@ -55,6 +56,19 @@ jobs:
             windows_resources.o \
             -lshell32 -luser32 -lgdi32 -lole32 \
             -o windows-notify-link-test.exe
+
+      - name: Check Windows client compilation
+        shell: bash
+        run: |
+          x86_64-w64-mingw32-gcc \
+            -std=gnu11 \
+            -Wall -Wextra -Wpedantic \
+            -DUNICODE -D_UNICODE \
+            -D_WIN32_WINNT=0x0600 \
+            -DNTDDI_VERSION=0x06000000 \
+            -DLIBCURL=0 -DLIBNOTIFY=0 -DLIBWEBSOCKETS=0 \
+            -I src \
+            -fsyntax-only src/main.c
 
   linux-notification-syntax:
     runs-on: ubuntu-latest

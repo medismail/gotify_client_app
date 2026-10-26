@@ -30,6 +30,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdint.h>
 
 #if defined(BPTS) && !defined(_WIN32)
 #include <dirent.h>
@@ -63,10 +64,12 @@ typedef struct {
 static Application *applications = NULL;
 static int application_count = 0;
 
-static struct {
+typedef struct {
     char url[MAX_PATH_LENGTH];
     char token[MAX_NAME_LENGTH];
-} configs;
+} ClientConfig;
+
+static ClientConfig configs;
 
 #if LIBCURL
 static bool image_downloads_enabled = false;
@@ -131,15 +134,21 @@ bool parseConf(const char *fileName)
 {
     FILE *fp;
     char line[CONFIG_ARG_MAX_BYTES * 2];
+    ClientConfig parsed = {0};
 
-    fp = fopen(fileName, "r");
-    if (fp == NULL) {
-        perror("fopen()");
+#ifdef _WIN32
+    wchar_t wide_path[FILENAME_MAX];
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, fileName, -1,
+                            wide_path, (int)(sizeof(wide_path) / sizeof(wide_path[0]))) == 0) {
         return false;
     }
-
-    configs.url[0] = '\0';
-    configs.token[0] = '\0';
+    fp = _wfopen(wide_path, L"r");
+#else
+    fp = fopen(fileName, "r");
+#endif
+    if (fp == NULL) {
+        return false;
+    }
 
     while (fgets(line, sizeof(line), fp) != NULL) {
         char *key;
@@ -162,19 +171,20 @@ bool parseConf(const char *fileName)
         key = trim_whitespace(key);
 
         if (strcmp(key, "URL") == 0) {
-            copy_string(configs.url, sizeof(configs.url), value);
+            copy_string(parsed.url, sizeof(parsed.url), value);
         } else if (strcmp(key, "Token") == 0) {
-            copy_string(configs.token, sizeof(configs.token), value);
+            copy_string(parsed.token, sizeof(parsed.token), value);
         }
     }
 
     fclose(fp);
 
-    if (configs.url[0] == '\0' || configs.token[0] == '\0') {
+    if (parsed.url[0] == '\0' || parsed.token[0] == '\0') {
         fprintf(stderr, "Config must contain URL and Token values\n");
         return false;
     }
 
+    configs = parsed;
     return true;
 }
 
@@ -391,7 +401,8 @@ static void sleep_seconds(int seconds)
 #ifdef _WIN32
     {
         DWORD remaining = (DWORD)seconds * 1000U;
-        while (remaining > 0 && !application_should_exit()) {
+        while (remaining > 0 && !application_should_exit() &&
+               !windows_settings_reload_requested()) {
             DWORD chunk = remaining < 100U ? remaining : 100U;
             Sleep(chunk);
             remaining -= chunk;
@@ -463,14 +474,29 @@ static const char *safe_image_extension(const char *image_path)
 
 static bool build_image_cache_name(int application_id,
                                    const char *image_path,
+                                   const char *server_url,
                                    char *out,
                                    size_t out_size)
 {
+#ifdef _WIN32
+    /* Application IDs are not unique across different Gotify servers. */
+    uint32_t server_hash = UINT32_C(2166136261);
+    const unsigned char *cursor = (const unsigned char *)server_url;
+    while (*cursor != '\0') {
+        server_hash ^= *cursor++;
+        server_hash *= UINT32_C(16777619);
+    }
+    int written = snprintf(out, out_size, "server-%08lx-application-%d%s",
+                           (unsigned long)server_hash, application_id,
+                           safe_image_extension(image_path));
+#else
+    (void)server_url;
     int written = snprintf(out,
                            out_size,
                            "application-%d%s",
                            application_id,
                            safe_image_extension(image_path));
+#endif
     return written >= 0 && (size_t)written < out_size;
 }
 
@@ -541,6 +567,7 @@ void get_applications_data(char *response,
                 fprintf(stderr, "Application image URL is too long\n");
             } else if (!build_image_cache_name(id->valueint,
                                                image->valuestring,
+                                               gotify_url,
                                                cache_name,
                                                sizeof(cache_name))) {
                 fprintf(stderr, "Application image cache name is too long\n");
@@ -804,7 +831,11 @@ static bool run_websocket_session(struct lws_context *context,
         return false;
     }
 
-    while (!websocket_done && !application_should_exit() &&
+    while (!websocket_done && !application_should_exit()
+#ifdef _WIN32
+           && !windows_settings_reload_requested()
+#endif
+           &&
            lws_service(context, 100) >= 0) {
     }
 
@@ -928,6 +959,25 @@ static void daemonize(void)
 
 int main(int argc, const char **argv)
 {
+#ifdef _WIN32
+    char config_path[FILENAME_MAX];
+    bool has_config;
+
+    if (argc >= 2) {
+        copy_string(config_path, sizeof(config_path), argv[1]);
+        has_config = parseConf(config_path);
+    } else {
+        if (!windows_default_config_path(config_path, sizeof(config_path))) {
+            fprintf(stderr, "Unable to determine the Windows configuration path\n");
+            return 1;
+        }
+        has_config = parseConf(config_path);
+        if (!has_config) {
+            /* Read an existing portable config, but save future edits per user. */
+            has_config = parseConf("GotifyClientApp.conf");
+        }
+    }
+#else
     if (argc < 2) {
         if (!parseConf("GotifyClientApp.conf")) {
             fprintf(stderr, "Usage: %s <Gotify Config File>\n", argv[0]);
@@ -936,6 +986,7 @@ int main(int argc, const char **argv)
     } else if (!parseConf(argv[1])) {
         return 1;
     }
+#endif
 
     if (argc < 3) {
         daemonize();
@@ -943,7 +994,36 @@ int main(int argc, const char **argv)
 
     runtime_services_init();
 
+#ifdef _WIN32
+    if (!windows_settings_configure(config_path, configs.url, configs.token,
+                                    !has_config)) {
+        fprintf(stderr, "Unable to initialize Windows settings\n");
+        runtime_services_shutdown();
+        return 1;
+    }
+    /* First run: leave the tray alive so Settings can create the config. */
+    while (!has_config && !application_should_exit()) {
+        if (windows_settings_take_reload()) {
+            has_config = parseConf(config_path);
+        } else {
+            Sleep(100);
+        }
+    }
+#endif
+
 #if LIBWEBSOCKETS
+#ifdef _WIN32
+    while (!application_should_exit()) {
+        if (windows_settings_take_reload()) {
+            if (parseConf(config_path)) {
+                free(applications);
+                applications = NULL;
+                application_count = 0;
+            } else {
+                fprintf(stderr, "Unable to reload the saved configuration\n");
+            }
+        }
+#endif
     {
         char hostname[MAX_HOSTNAME_LENGTH];
         int port;
@@ -973,8 +1053,13 @@ int main(int argc, const char **argv)
                        path,
                        sizeof(path),
                        &use_ssl)) {
+#ifdef _WIN32
+            sleep_seconds(2);
+            continue;
+#else
             runtime_services_shutdown();
             return 1;
+#endif
         }
 
         build_endpoint_path(path, "stream", ws_path, sizeof(ws_path));
@@ -993,8 +1078,13 @@ int main(int argc, const char **argv)
         context = lws_create_context(&context_info);
         if (context == NULL) {
             fprintf(stderr, "lws init failed\n");
+#ifdef _WIN32
+            sleep_seconds(2);
+            continue;
+#else
             runtime_services_shutdown();
             return 1;
+#endif
         }
 
         memset(&connect_info_http, 0, sizeof(connect_info_http));
@@ -1017,11 +1107,19 @@ int main(int argc, const char **argv)
         if (wsi == NULL) {
             fprintf(stderr, "Failed to perform HTTP GET request\n");
             lws_context_destroy(context);
+#ifdef _WIN32
+            sleep_seconds(2);
+            continue;
+#else
             runtime_services_shutdown();
             return 1;
+#endif
         }
 
         while (!rest_done && !application_should_exit() &&
+#ifdef _WIN32
+               !windows_settings_reload_requested() &&
+#endif
                lws_service(context, 1000) >= 0) {
         }
         if (rest_failed) {
@@ -1045,11 +1143,19 @@ int main(int argc, const char **argv)
             connect_info.ssl_connection = LCCSCF_USE_SSL;
         }
 
-        while (!application_should_exit()) {
+        while (!application_should_exit()
+#ifdef _WIN32
+               && !windows_settings_reload_requested()
+#endif
+        ) {
             bool clean_exit = run_websocket_session(context, &connect_info);
             int delay;
 
-            if (clean_exit) {
+            if (clean_exit
+#ifdef _WIN32
+                || windows_settings_reload_requested()
+#endif
+            ) {
                 break;
             }
 
@@ -1072,6 +1178,9 @@ int main(int argc, const char **argv)
 
         lws_context_destroy(context);
     }
+#ifdef _WIN32
+    }
+#endif
 #else
     fprintf(stderr, "libwebsockets support is disabled\n");
     runtime_services_shutdown();

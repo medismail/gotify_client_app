@@ -16,6 +16,7 @@
 #include <windowsx.h>
 #include <shellapi.h>
 #include <initguid.h>
+#include <shlobj.h>
 #include <wincodec.h>
 #include <limits.h>
 #include <stdint.h>
@@ -46,8 +47,10 @@
 
 #define WM_TRAYICON (WM_APP + 1)
 #define WM_GOTIFY_NOTIFICATION (WM_APP + 2)
+#define WM_SETTINGS_CONFIGURE (WM_APP + 3)
 #define ID_TRAY_EXIT 1001
 #define ID_TRAY_TEST_NOTIFICATION 1002
+#define ID_TRAY_SETTINGS 1003
 #define TRAY_SHUTDOWN_TIMEOUT_MS 5000U
 #define CHANNEL_IMAGE_PATH_CHARS 1024
 
@@ -56,6 +59,13 @@ struct tray_notification_payload {
     wchar_t text[256];
     wchar_t image_path[CHANNEL_IMAGE_PATH_CHARS];
     DWORD icon_type;
+};
+
+struct settings_initial_payload {
+    wchar_t path[FILENAME_MAX];
+    wchar_t url[256];
+    wchar_t token[256];
+    bool open_dialog;
 };
 
 struct channel_icon_cache_entry {
@@ -84,9 +94,64 @@ static volatile LONG tray_init_result = 0;
 static HANDLE tray_thread = NULL;
 static DWORD tray_thread_id = 0;
 static bool tray_debug_enabled = false;
+/* The tray thread owns these strings; the worker sees only an atomic flag. */
+static wchar_t settings_path[FILENAME_MAX];
+static wchar_t settings_url[256];
+static wchar_t settings_token[256];
+static volatile LONG settings_reload_pending = 0;
 
 static LRESULT CALLBACK tray_window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
 static DWORD WINAPI tray_thread_proc(LPVOID parameter);
+static void clear_channel_icon_cache(void);
+
+bool windows_default_config_path(char *out, size_t out_size)
+{
+    PWSTR roaming = NULL;
+    wchar_t directory[FILENAME_MAX];
+    wchar_t full_path[FILENAME_MAX];
+    int required;
+    bool success = false;
+
+    if (out == NULL || out_size == 0 || out_size > INT_MAX) {
+        return false;
+    }
+    out[0] = '\0';
+    if (FAILED(SHGetKnownFolderPath(&FOLDERID_RoamingAppData, 0, NULL, &roaming))) {
+        return false;
+    }
+    if (swprintf(directory, ARRAYSIZE(directory), L"%ls\\GotifyClientApp",
+                 roaming) < 0 ||
+        wcslen(directory) + wcslen(L"\\GotifyClientApp.conf") >=
+            ARRAYSIZE(full_path)) {
+        goto cleanup;
+    }
+    if (!CreateDirectoryW(directory, NULL) &&
+        GetLastError() != ERROR_ALREADY_EXISTS) {
+        goto cleanup;
+    }
+    if (swprintf(full_path, ARRAYSIZE(full_path), L"%ls\\GotifyClientApp.conf",
+                 directory) < 0) {
+        goto cleanup;
+    }
+    required = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+                                   full_path, -1, out, (int)out_size,
+                                   NULL, NULL);
+    success = required > 0;
+
+cleanup:
+    CoTaskMemFree(roaming);
+    return success;
+}
+
+bool windows_settings_reload_requested(void)
+{
+    return InterlockedCompareExchange(&settings_reload_pending, 0, 0) != 0;
+}
+
+bool windows_settings_take_reload(void)
+{
+    return InterlockedExchange(&settings_reload_pending, 0) != 0;
+}
 
 static HWND get_tray_hwnd(void)
 {
@@ -183,6 +248,130 @@ static void copy_utf8_to_wide(wchar_t *dest, size_t dest_count, const char *src)
     }
 
     free(wide);
+}
+
+bool windows_settings_configure(const char *path_utf8,
+                                const char *url_utf8,
+                                const char *token_utf8,
+                                bool open_dialog)
+{
+    struct settings_initial_payload *payload;
+    HWND hwnd = get_tray_hwnd();
+
+    if (hwnd == NULL || path_utf8 == NULL) {
+        return false;
+    }
+    payload = (struct settings_initial_payload *)calloc(1, sizeof(*payload));
+    if (payload == NULL) {
+        return false;
+    }
+    copy_utf8_to_wide(payload->path, ARRAYSIZE(payload->path), path_utf8);
+    copy_utf8_to_wide(payload->url, ARRAYSIZE(payload->url), url_utf8);
+    copy_utf8_to_wide(payload->token, ARRAYSIZE(payload->token), token_utf8);
+    payload->open_dialog = open_dialog;
+    if (payload->path[0] == L'\0' ||
+        !PostMessageW(hwnd, WM_SETTINGS_CONFIGURE, 0, (LPARAM)payload)) {
+        free(payload);
+        return false;
+    }
+    return true;
+}
+
+static bool settings_value_to_utf8(const wchar_t *wide, char *out, size_t count)
+{
+    if (count == 0 || count > INT_MAX) {
+        return false;
+    }
+    return WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, -1,
+                               out, (int)count, NULL, NULL) > 0;
+}
+
+static bool save_settings_file(const wchar_t *url, const wchar_t *token)
+{
+    wchar_t temporary_path[FILENAME_MAX + 5];
+    char url_utf8[1024];
+    char token_utf8[1024];
+    FILE *file;
+    bool success;
+
+    if (settings_path[0] == L'\0' ||
+        !settings_value_to_utf8(url, url_utf8, sizeof(url_utf8)) ||
+        !settings_value_to_utf8(token, token_utf8, sizeof(token_utf8)) ||
+        swprintf(temporary_path, ARRAYSIZE(temporary_path), L"%ls.tmp",
+                 settings_path) < 0) {
+        return false;
+    }
+
+    file = _wfopen(temporary_path, L"wb");
+    if (file == NULL) {
+        return false;
+    }
+    success = fprintf(file, "URL=%s\nToken=%s\n", url_utf8, token_utf8) > 0;
+    if (fflush(file) != 0 || ferror(file)) {
+        success = false;
+    }
+    if (fclose(file) != 0) {
+        success = false;
+    }
+    if (success) {
+        success = MoveFileExW(temporary_path, settings_path,
+                              MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
+    }
+    if (!success) {
+        DeleteFileW(temporary_path);
+    }
+    return success;
+}
+
+static INT_PTR CALLBACK settings_dialog_proc(HWND dialog, UINT msg,
+                                              WPARAM wparam, LPARAM lparam)
+{
+    (void)lparam;
+    switch (msg) {
+        case WM_INITDIALOG:
+            SendDlgItemMessageW(dialog, IDC_SETTINGS_URL, EM_LIMITTEXT, 255, 0);
+            SendDlgItemMessageW(dialog, IDC_SETTINGS_TOKEN, EM_LIMITTEXT, 255, 0);
+            SetDlgItemTextW(dialog, IDC_SETTINGS_URL, settings_url);
+            SetDlgItemTextW(dialog, IDC_SETTINGS_TOKEN, settings_token);
+            return TRUE;
+
+        case WM_COMMAND:
+            if (LOWORD(wparam) == IDCANCEL) {
+                EndDialog(dialog, IDCANCEL);
+                return TRUE;
+            }
+            if (LOWORD(wparam) == IDOK) {
+                wchar_t url[ARRAYSIZE(settings_url)];
+                wchar_t token[ARRAYSIZE(settings_token)];
+                GetDlgItemTextW(dialog, IDC_SETTINGS_URL, url, ARRAYSIZE(url));
+                GetDlgItemTextW(dialog, IDC_SETTINGS_TOKEN, token, ARRAYSIZE(token));
+
+                if ((wcsncmp(url, L"http://", 7) != 0 &&
+                     wcsncmp(url, L"https://", 8) != 0) ||
+                    (wcsncmp(url, L"http://", 7) == 0 && url[7] == L'\0') ||
+                    (wcsncmp(url, L"https://", 8) == 0 && url[8] == L'\0') ||
+                    token[0] == L'\0' || wcschr(url, L'\n') ||
+                    wcschr(token, L'\n') || wcschr(url, L'\r') ||
+                    wcschr(token, L'\r')) {
+                    MessageBoxW(dialog, L"Enter a valid http(s) URL and a client token.",
+                                L"Gotify Settings", MB_OK | MB_ICONWARNING);
+                    return TRUE;
+                }
+                if (!save_settings_file(url, token)) {
+                    MessageBoxW(dialog, L"Unable to save the configuration file.",
+                                L"Gotify Settings", MB_OK | MB_ICONERROR);
+                    return TRUE;
+                }
+                copy_wide_truncated(settings_url, ARRAYSIZE(settings_url), url);
+                copy_wide_truncated(settings_token, ARRAYSIZE(settings_token), token);
+                clear_channel_icon_cache();
+                InterlockedExchange(&settings_reload_pending, 1);
+                EndDialog(dialog, IDOK);
+                return TRUE;
+            }
+            break;
+    }
+    return FALSE;
 }
 
 static wchar_t *duplicate_wide_string(const wchar_t *value)
@@ -596,6 +785,11 @@ static void execute_tray_command(HWND hwnd, UINT command)
         InterlockedExchange(&quit_requested, 1);
         DestroyWindow(hwnd);
         ExitProcess(0);
+    } else if (command == ID_TRAY_SETTINGS) {
+        if (settings_path[0] != L'\0') {
+            DialogBoxParamW(tray_instance, MAKEINTRESOURCEW(IDD_SETTINGS),
+                            hwnd, settings_dialog_proc, 0);
+        }
     } else if (command == ID_TRAY_TEST_NOTIFICATION) {
         struct tray_notification_payload payload;
 
@@ -756,6 +950,7 @@ bool windows_notifications_init(void)
                                                   ARRAYSIZE(debug_value)) > 0;
     InterlockedExchange(&quit_requested, 0);
     InterlockedExchange(&tray_init_result, 0);
+    InterlockedExchange(&settings_reload_pending, 0);
     set_tray_hwnd(NULL);
 
     ready_event = CreateEventW(NULL, TRUE, FALSE, NULL);
@@ -880,11 +1075,31 @@ static LRESULT CALLBACK tray_window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPA
         case WM_CREATE:
             tray_menu = CreatePopupMenu();
             if (tray_menu != NULL) {
+                AppendMenuW(tray_menu, MF_STRING, ID_TRAY_SETTINGS, L"Settings...");
                 AppendMenuW(tray_menu, MF_STRING, ID_TRAY_TEST_NOTIFICATION, L"Test Notification");
                 AppendMenuW(tray_menu, MF_SEPARATOR, 0, NULL);
                 AppendMenuW(tray_menu, MF_STRING, ID_TRAY_EXIT, L"Exit");
             }
             break;
+
+        case WM_SETTINGS_CONFIGURE:
+        {
+            struct settings_initial_payload *payload =
+                (struct settings_initial_payload *)lparam;
+            if (payload != NULL) {
+                copy_wide_truncated(settings_path, ARRAYSIZE(settings_path),
+                                    payload->path);
+                copy_wide_truncated(settings_url, ARRAYSIZE(settings_url),
+                                    payload->url);
+                copy_wide_truncated(settings_token, ARRAYSIZE(settings_token),
+                                    payload->token);
+                if (payload->open_dialog) {
+                    execute_tray_command(hwnd, ID_TRAY_SETTINGS);
+                }
+                free(payload);
+            }
+            break;
+        }
 
         case WM_GOTIFY_NOTIFICATION:
         {

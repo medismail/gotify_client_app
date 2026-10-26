@@ -34,6 +34,26 @@ URL=https://gotify.srv:8080/
 Token=YOUR_GOTIFY_TOKEN
 ```
 
+#### Windows tray settings (experimental branch)
+
+On Windows, right-click the Gotify tray icon and select **Settings...** to edit
+the server URL and client token. **Save & Reconnect** writes the configuration
+and reconnects to Gotify without restarting the executable. The token field is
+masked in the dialog.
+
+By default, settings are saved to
+
+`%APPDATA%\GotifyClientApp\GotifyClientApp.conf`
+
+If no per-user configuration exists, a legacy `GotifyClientApp.conf` in the
+working directory is read for compatibility. The first save migrates settings
+to the per-user location. A configuration file supplied on the command line
+continues to be used for both loading and saving. With no existing configuration,
+the Windows Settings dialog opens at startup.
+
+On Linux, configuration loading remains unchanged. Do not commit real Gotify
+client tokens to a public repository.
+
 ### Building
 
 This project uses CMake:
