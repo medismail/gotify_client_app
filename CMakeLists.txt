@@ -30,25 +30,20 @@ add_executable(GotifyClientApp
     src/main.c
 )
 
-if(WIN32)
+if(WIN32 AND MINGW)
     option(GOTIFY_WINDOWS_CONSOLE
         "Build the Windows client with a console window for debugging" OFF)
 
-    if(MINGW)
-        # The tray app runs without a console by default. Enable the console
-        # subsystem explicitly when troubleshooting startup/network errors.
-        if(GOTIFY_WINDOWS_CONSOLE)
-            set_property(TARGET GotifyClientApp APPEND_STRING PROPERTY LINK_FLAGS " -mconsole")
-        else()
-            set_property(TARGET GotifyClientApp APPEND_STRING PROPERTY LINK_FLAGS " -mwindows")
-        endif()
+    # The tray app runs without a console by default. Enable the console
+    # subsystem explicitly when troubleshooting startup/network errors.
+    if(GOTIFY_WINDOWS_CONSOLE)
+        set_property(TARGET GotifyClientApp APPEND_STRING PROPERTY LINK_FLAGS " -mconsole")
     else()
-        # Equivalent subsystem choice for non-MinGW Windows toolchains.
-        if(NOT GOTIFY_WINDOWS_CONSOLE)
-            set_target_properties(GotifyClientApp PROPERTIES WIN32_EXECUTABLE TRUE)
-        endif()
+        set_property(TARGET GotifyClientApp APPEND_STRING PROPERTY LINK_FLAGS " -mwindows")
     endif()
+endif()
 
+if(WIN32)
     enable_language(RC)
     configure_file(
         ${CMAKE_CURRENT_SOURCE_DIR}/src/windows_resources.rc.in
