@@ -16,6 +16,7 @@
 #include <windowsx.h>
 #include <shellapi.h>
 #include <initguid.h>
+#include <knownfolders.h>
 #include <shlobj.h>
 #include <wincodec.h>
 #include <limits.h>
